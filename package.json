@@ -1,0 +1,39 @@
+{
+  "name": "suiyunzou-hot-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:apply": "node scripts/apply-sqlite-migration.mjs",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/adapter-better-sqlite3": "latest",
+    "@prisma/client": "latest",
+    "better-sqlite3": "latest",
+    "cheerio": "latest",
+    "dotenv": "latest",
+    "lucide-react": "latest",
+    "next": "latest",
+    "nodemailer": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "@types/nodemailer": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "prisma": "latest",
+    "typescript": "latest"
+  }
+}

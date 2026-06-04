@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum SourceType {
+  OFFICIAL
+  TWITTER
+  SEARCH
+}
+
+enum CredibilityLevel {
+  OFFICIAL
+  PRIMARY
+  MEDIA
+  SOCIAL_VERIFIED
+  SOCIAL
+  SEARCH_SNIPPET
+}
+
+enum RawItemStatus {
+  NEW
+  EXTRACTED
+  ANALYZED
+  IGNORED
+  FAILED
+}
+
+enum TopicStatus {
+  CONFIRMED
+  MULTI_SOURCE_SIGNAL
+  SOCIAL_BUZZ
+  NEEDS_VERIFICATION
+}
+
+enum CollectRunStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL_SUCCESS
+  FAILED
+}
+
+model Source {
+  id               String           @id @default(cuid())
+  key              String           @unique
+  name             String
+  type             SourceType
+  homepageUrl      String?
+  entryUrl         String?
+  enabled          Boolean          @default(true)
+  credibilityLevel CredibilityLevel @default(MEDIA)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  rawItems         RawItem[]
+}
+
+model RawItem {
+  id               String           @id @default(cuid())
+  sourceId         String
+  source           Source           @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  watchKeywordId   String?
+  watchKeyword     WatchKeyword?    @relation(fields: [watchKeywordId], references: [id], onDelete: SetNull)
+  externalId       String?
+  url              String
+  canonicalUrl     String?
+  title            String
+  author           String?
+  excerpt          String?
+  content          String?
+  language         String?
+  publishedAt      DateTime?
+  fetchedAt        DateTime         @default(now())
+  sourceType       SourceType
+  credibilityLevel CredibilityLevel
+  status           RawItemStatus    @default(NEW)
+  metadataJson     String?
+  topicLinks       TopicSource[]
+
+  @@unique([sourceId, url])
+  @@index([publishedAt])
+  @@index([fetchedAt])
+  @@index([sourceType])
+  @@index([watchKeywordId])
+}
+
+model WatchKeyword {
+  id          String    @id @default(cuid())
+  keyword     String    @unique
+  enabled     Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  rawItems    RawItem[]
+
+  @@index([enabled])
+}
+
+model HotTopic {
+  id                String        @id @default(cuid())
+  title             String
+  summary           String
+  whyItMatters      String?
+  category          String
+  hotScore          Int
+  confidence        Int
+  status            TopicStatus
+  needsVerification Boolean       @default(false)
+  firstSeenAt       DateTime      @default(now())
+  lastSeenAt        DateTime      @default(now())
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  sources           TopicSource[]
+  aiAnalyses        AiAnalysis[]
+  emailItems        EmailDigestItem[]
+
+  @@index([hotScore])
+  @@index([lastSeenAt])
+  @@index([status])
+}
+
+model TopicSource {
+  id         String   @id @default(cuid())
+  topicId    String
+  rawItemId  String
+  topic      HotTopic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  rawItem    RawItem  @relation(fields: [rawItemId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([topicId, rawItemId])
+}
+
+model AiAnalysis {
+  id             String   @id @default(cuid())
+  topicId        String?
+  topic          HotTopic? @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  model          String
+  task           String
+  inputJson      String
+  outputJson     String
+  promptTokens   Int?
+  completionTokens Int?
+  createdAt      DateTime @default(now())
+
+  @@index([task])
+  @@index([createdAt])
+}
+
+model CollectRun {
+  id              String           @id @default(cuid())
+  sourceType      SourceType?
+  status          CollectRunStatus @default(RUNNING)
+  startedAt       DateTime         @default(now())
+  finishedAt      DateTime?
+  fetchedCount    Int              @default(0)
+  newCount        Int              @default(0)
+  errorMessage    String?
+  metadataJson    String?
+
+  @@index([startedAt])
+  @@index([status])
+}
+
+model EmailDigest {
+  id           String            @id @default(cuid())
+  subject      String
+  recipient    String
+  status       String
+  sentAt       DateTime?
+  errorMessage String?
+  createdAt    DateTime          @default(now())
+  items        EmailDigestItem[]
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+model EmailDigestItem {
+  id        String      @id @default(cuid())
+  digestId  String
+  topicId   String
+  digest    EmailDigest @relation(fields: [digestId], references: [id], onDelete: Cascade)
+  topic     HotTopic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@unique([digestId, topicId])
+}
