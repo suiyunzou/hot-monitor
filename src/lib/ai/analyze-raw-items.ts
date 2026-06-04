@@ -83,9 +83,11 @@ export async function analyzeRawItems(limit = 5) {
 
     const topic = await prisma.hotTopic.create({
       data: {
-        title: analysis.topic,
+        title: cleanText(analysis.topic) || linkedRawItems[0]?.title || "未命名 AI 热点",
         summary: analysis.summary,
-        whyItMatters: analysis.why_it_matters,
+        whyItMatters:
+          cleanText(analysis.why_it_matters) ||
+          "该热点来自已采集的真实来源，需要继续核验影响范围。",
         category: analysis.category,
         hotScore: analysis.hot_score,
         confidence: analysis.confidence,
@@ -128,6 +130,10 @@ export async function analyzeRawItems(limit = 5) {
     topicCount,
     model: openRouterResult.model
   };
+}
+
+function cleanText(value: string) {
+  return value.trim();
 }
 
 function inferTopicStatus(

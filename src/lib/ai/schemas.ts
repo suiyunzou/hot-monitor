@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const rawItemAnalysisSchema = z.object({
   is_ai_related: z.boolean(),
-  topic: z.string().min(1),
+  topic: z.string(),
   category: z.enum([
     "model_release",
     "product_update",
@@ -16,7 +16,7 @@ export const rawItemAnalysisSchema = z.object({
     "other"
   ]),
   summary: z.string().min(1),
-  why_it_matters: z.string().min(1),
+  why_it_matters: z.string(),
   hot_score: z.number().int().min(0).max(100),
   confidence: z.number().int().min(0).max(100),
   source_ids: z.array(z.string()).min(1),

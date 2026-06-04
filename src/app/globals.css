@@ -148,6 +148,23 @@ h1 {
   box-shadow: 0 14px 28px rgba(216, 90, 50, 0.22);
 }
 
+.scan-button--secondary {
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+}
+
+.scan-button--secondary:hover {
+  background: var(--signal);
+  color: var(--paper);
+  box-shadow: 0 14px 28px rgba(11, 143, 123, 0.18);
+}
+
+.scan-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+  transform: none;
+}
+
 .scan-button:active {
   transform: translate(1px, 1px);
   box-shadow: 0 7px 16px rgba(23, 32, 26, 0.14);
@@ -243,9 +260,9 @@ h1 {
 
 .command-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
-  width: min(1040px, 100%);
+  width: min(1180px, 100%);
   margin: 16px auto 18px;
 }
 
@@ -469,6 +486,12 @@ h1 {
 
 .keyword-chip:hover {
   transform: translateX(2px);
+}
+
+.keyword-chip:disabled {
+  cursor: wait;
+  opacity: 0.78;
+  transform: none;
 }
 
 .keyword-chip__label {

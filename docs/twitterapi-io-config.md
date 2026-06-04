@@ -13,7 +13,7 @@ TWITTERAPI_IO_KEY
 打开 PowerShell，执行：
 
 ```powershell
-[Environment]::SetEnvironmentVariable("TWITTERAPI_IO_KEY", "new1_8471637738ba41f7836c56b0308285df", "User")
+[Environment]::SetEnvironmentVariable("TWITTERAPI_IO_KEY", "你的_twitterapi_io_key", "User")
 ```
 
 执行后需要重启：
@@ -61,5 +61,3 @@ TWITTERAPI_IO_KEY is not configured
 
 如果 Key 配置正确，会开始调用 twitterapi.io 的 advanced search 接口，并将结果保存到数据库。
 
-[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "your_twitterapi_io_key", "User""
-[Environment]::SetEnvironmentVariable("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash", "User""

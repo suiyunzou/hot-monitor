@@ -9,7 +9,8 @@ const collectRequestSchema = z.object({
   collectors: z.array(z.enum(["official", "search", "twitterapi-io"])).optional(),
   limit: z.number().int().min(1).max(30).optional(),
   query: z.string().min(2).max(240).optional(),
-  keywordOnly: z.boolean().optional()
+  keywordOnly: z.boolean().optional(),
+  background: z.boolean().optional()
 });
 
 export async function GET() {
@@ -44,6 +45,17 @@ export async function POST(request: Request) {
   }
 
   try {
+    if (parsed.data.background) {
+      void runCollectors(parsed.data).catch((error) => {
+        console.error("Background collect failed", error);
+      });
+
+      return NextResponse.json({
+        status: "STARTED",
+        message: "Collect job started in background"
+      });
+    }
+
     const result = await runCollectors(parsed.data);
     return NextResponse.json(result);
   } catch (error) {

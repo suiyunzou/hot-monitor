@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { prisma } from "@/lib/db/prisma";
 import { analyzeRawItems } from "@/lib/ai/analyze-raw-items";
 
@@ -42,6 +42,8 @@ export async function GET() {
   ]);
 
   return NextResponse.json({
+    analysisConfigured: Boolean(process.env.OPENROUTER_API_KEY),
+    model: process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash",
     pendingRawItems,
     topics: topics.map((topic) => ({
       id: topic.id,
@@ -79,9 +81,29 @@ export async function POST(request: Request) {
   }
 
   try {
+    if (!process.env.OPENROUTER_API_KEY) {
+      return NextResponse.json(
+        {
+          error: "OPENROUTER_API_KEY is not configured",
+          code: "OPENROUTER_NOT_CONFIGURED"
+        },
+        { status: 409 }
+      );
+    }
+
     const result = await analyzeRawItems(parsed.data.limit ?? 5);
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof ZodError) {
+      return NextResponse.json(
+        {
+          error: "AI 输出结构不完整，请重试或降低分析数量",
+          issues: error.flatten()
+        },
+        { status: 502 }
+      );
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : String(error)

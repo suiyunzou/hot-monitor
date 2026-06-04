@@ -3,7 +3,6 @@
 import {
   Activity,
   BadgeCheck,
-  Clock3,
   ExternalLink,
   Globe2,
   Mail,
@@ -12,6 +11,7 @@ import {
   Radar,
   RefreshCcw,
   Search,
+  Settings2,
   ShieldAlert,
   Sparkles,
   Zap
@@ -41,7 +41,7 @@ type Topic = {
   time: string;
 };
 
-type RawNewsItem = {
+export type RawNewsItem = {
   id: string;
   title: string;
   url: string;
@@ -54,13 +54,31 @@ type RawNewsItem = {
   publishedAt?: string;
 };
 
-type WatchKeyword = {
+export type WatchKeyword = {
   id: string;
   keyword: string;
   enabled: boolean;
 };
 
-type HotTopicApiItem = {
+type CollectRunApiItem = {
+  id: string;
+  status: "RUNNING" | "SUCCESS" | "PARTIAL_SUCCESS" | "FAILED";
+  startedAt: string;
+  finishedAt?: string | null;
+  fetchedCount: number;
+  newCount: number;
+  errorMessage?: string | null;
+  metadataJson?: string | null;
+};
+
+type AnalyzeApiResponse = {
+  analysisConfigured: boolean;
+  model: string;
+  pendingRawItems: number;
+  topics: HotTopicApiItem[];
+};
+
+export type HotTopicApiItem = {
   id: string;
   title: string;
   summary: string;
@@ -152,16 +170,38 @@ const statusIcon: Record<TopicStatus, ReactNode> = {
   verify: <ShieldAlert size={16} />
 };
 
-export function RadarDashboard() {
+type RadarDashboardProps = {
+  initialRawItems?: RawNewsItem[];
+  initialHotTopics?: HotTopicApiItem[];
+  initialWatchKeywords?: WatchKeyword[];
+};
+
+export function RadarDashboard({
+  initialRawItems = [],
+  initialHotTopics = [],
+  initialWatchKeywords = []
+}: RadarDashboardProps) {
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
-  const [activeTopicTitle, setActiveTopicTitle] = useState(topics[0].title);
+  const [activeTopicTitle, setActiveTopicTitle] = useState(
+    () =>
+      initialRawItems[0]?.title ??
+      initialHotTopics[0]?.title ??
+      topics[0].title
+  );
   const [scanPulse, setScanPulse] = useState(0);
-  const [rawItems, setRawItems] = useState<RawNewsItem[]>([]);
-  const [liveTopics, setLiveTopics] = useState<Topic[]>([]);
-  const [watchKeywords, setWatchKeywords] = useState<WatchKeyword[]>([]);
-  const [keywordsLoaded, setKeywordsLoaded] = useState(false);
+  const [rawItems, setRawItems] = useState<RawNewsItem[]>(initialRawItems);
+  const [liveTopics, setLiveTopics] = useState<Topic[]>(() => initialHotTopics.map(mapHotTopic));
+  const [watchKeywords, setWatchKeywords] = useState<WatchKeyword[]>(initialWatchKeywords);
+  const [keywordsLoaded, setKeywordsLoaded] = useState(initialWatchKeywords.length > 0);
   const [keywordInput, setKeywordInput] = useState("");
   const [scanStatus, setScanStatus] = useState("待命");
+  const [analysisStatus, setAnalysisStatus] = useState("待分析");
+  const [analysisModel, setAnalysisModel] = useState("deepseek-v4-flash");
+  const [pendingRawItems, setPendingRawItems] = useState(0);
+  const [analysisConfigured, setAnalysisConfigured] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [pendingKeywordIds, setPendingKeywordIds] = useState<string[]>([]);
 
   const rawItemTopics = useMemo(() => rawItems.map(mapRawItemTopic), [rawItems]);
   const dashboardTopics = useMemo(() => {
@@ -187,10 +227,24 @@ export function RadarDashboard() {
     dashboardTopics.find((topic) => topic.title === activeTopicTitle) ?? visibleTopics[0] ?? dashboardTopics[0];
 
   useEffect(() => {
+    document.documentElement.dataset.hotMonitorHydrated = "true";
     void loadRawItems();
     void loadHotTopics();
     void loadWatchKeywords();
+    void loadCollectStatus();
   }, []);
+
+  useEffect(() => {
+    if (!isScanning) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadCollectStatus();
+    }, 2500);
+
+    return () => window.clearInterval(timer);
+  }, [isScanning]);
 
   useEffect(() => {
     if (!dashboardTopics.some((topic) => topic.title === activeTopicTitle)) {
@@ -214,7 +268,11 @@ export function RadarDashboard() {
       return;
     }
 
-    const data = (await response.json()) as { topics: HotTopicApiItem[] };
+    const data = (await response.json()) as AnalyzeApiResponse;
+    setAnalysisConfigured(data.analysisConfigured);
+    setAnalysisModel(data.model);
+    setPendingRawItems(data.pendingRawItems);
+    setAnalysisStatus(formatAnalysisStatus(data));
     setLiveTopics(data.topics.map(mapHotTopic));
   }
 
@@ -228,6 +286,32 @@ export function RadarDashboard() {
     const data = (await response.json()) as { keywords: WatchKeyword[] };
     setWatchKeywords(data.keywords);
     setKeywordsLoaded(true);
+  }
+
+  async function loadCollectStatus() {
+    const response = await fetch("/api/collect", { cache: "no-store" });
+    if (!response.ok) {
+      return;
+    }
+
+    const data = (await response.json()) as { latestRuns: CollectRunApiItem[] };
+    const latestRun = data.latestRuns[0];
+    if (!latestRun) {
+      setScanStatus("待命");
+      setIsScanning(false);
+      return;
+    }
+
+    setScanStatus(formatCollectRunStatus(latestRun));
+
+    if (latestRun.status === "RUNNING") {
+      setIsScanning(true);
+      return;
+    }
+
+    setIsScanning(false);
+    await loadRawItems();
+    await loadHotTopics();
   }
 
   async function addWatchKeyword(event: React.FormEvent<HTMLFormElement>) {
@@ -253,22 +337,35 @@ export function RadarDashboard() {
   }
 
   async function toggleWatchKeyword(keyword: WatchKeyword) {
-    const response = await fetch(`/api/watch-keywords/${keyword.id}`, {
-      method: "PATCH",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ enabled: !keyword.enabled })
-    });
+    const nextEnabled = !keyword.enabled;
+    setPendingKeywordIds((current) => [...current, keyword.id]);
+    setWatchKeywords((current) =>
+      current.map((item) => (item.id === keyword.id ? { ...item, enabled: nextEnabled } : item))
+    );
 
-    if (response.ok) {
+    try {
+      await fetch(`/api/watch-keywords/${keyword.id}`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ enabled: nextEnabled })
+      });
+    } finally {
       await loadWatchKeywords();
+      setPendingKeywordIds((current) => current.filter((id) => id !== keyword.id));
     }
   }
 
   async function triggerScan() {
+    if (isScanning) {
+      return;
+    }
+
+    setIsScanning(true);
     setScanPulse((value) => value + 1);
     setScanStatus("采集中");
+    let keepPolling = false;
 
     try {
       const response = await fetch("/api/collect", {
@@ -279,11 +376,13 @@ export function RadarDashboard() {
         body: JSON.stringify({
           collectors: ["search"],
           keywordOnly: watchKeywords.some((keyword) => keyword.enabled),
-          limit: 1
+          limit: 1,
+          background: true
         })
       });
       const result = (await response.json()) as {
         status?: string;
+        message?: string;
         newCount?: number;
         errors?: string[];
         keywordCount?: number;
@@ -294,12 +393,80 @@ export function RadarDashboard() {
         throw new Error(result.errors?.join("; ") || "collect failed");
       }
 
+      if (result.status === "STARTED") {
+        keepPolling = true;
+        setScanStatus("后台采集中");
+        window.setTimeout(() => {
+          void loadCollectStatus();
+        }, 900);
+        return;
+      }
+
       const keywordText = result.keywords?.length ? ` / ${result.keywords.join("、")}` : "";
       setScanStatus(`${result.status ?? "完成"} / 新增 ${result.newCount ?? 0}${keywordText}`);
       await loadRawItems();
       await loadHotTopics();
     } catch (error) {
       setScanStatus(error instanceof Error ? error.message : "采集失败");
+    } finally {
+      if (!keepPolling) {
+        setIsScanning(false);
+      }
+    }
+  }
+
+  async function triggerAnalysis() {
+    if (isAnalyzing) {
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisStatus("分析中");
+
+    try {
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          limit: 6
+        })
+      });
+      const result = (await response.json()) as {
+        analyzedCount?: number;
+        topicCount?: number;
+        model?: string;
+        message?: string;
+        error?: string;
+        code?: string;
+      };
+
+      if (!response.ok) {
+        if (result.code === "OPENROUTER_NOT_CONFIGURED") {
+          setAnalysisStatus("未配置 OpenRouter");
+          return;
+        }
+
+        throw new Error(result.error || "AI 分析失败");
+      }
+
+      if (result.model) {
+        setAnalysisModel(result.model);
+      }
+
+      if (result.analyzedCount === 0) {
+        setAnalysisStatus("无新增线索");
+      } else {
+        setAnalysisStatus(`完成 / 新增热点 ${result.topicCount ?? 0}`);
+      }
+
+      await loadRawItems();
+      await loadHotTopics();
+    } catch (error) {
+      setAnalysisStatus(error instanceof Error ? error.message : "AI 分析失败");
+    } finally {
+      setIsAnalyzing(false);
     }
   }
 
@@ -313,9 +480,35 @@ export function RadarDashboard() {
             只追踪官网、X 信号和 Google/Bing 搜索证据。AI 负责筛选和摘要，事实必须能回到原始链接。
           </p>
           <div className="hero__actions">
-            <button className="scan-button" type="button" onClick={triggerScan}>
+            <button
+              className="scan-button"
+              data-hot-monitor-scan="true"
+              type="button"
+              disabled={isScanning}
+              onClick={triggerScan}
+              onPointerDown={() => {
+                if (!isScanning) {
+                  setScanStatus("准备采集");
+                }
+              }}
+            >
               <Zap size={18} />
-              同步采集
+              {isScanning ? "采集中" : "同步采集"}
+            </button>
+            <button
+              className="scan-button scan-button--secondary"
+              data-hot-monitor-analyze="true"
+              type="button"
+              disabled={isAnalyzing || (!analysisConfigured && pendingRawItems === 0)}
+              title={
+                analysisConfigured
+                  ? `待分析 ${pendingRawItems} 条原始线索`
+                  : "需要先配置 OPENROUTER_API_KEY"
+              }
+              onClick={triggerAnalysis}
+            >
+              <Sparkles size={18} />
+              {isAnalyzing ? "分析中" : "AI 分析"}
             </button>
           </div>
         </div>
@@ -333,10 +526,21 @@ export function RadarDashboard() {
       </section>
 
       <section className="command-strip" aria-label="system status">
-        <StatusCell icon={<Clock3 size={18} />} label="下次抓取" value="2 小时内" />
-        <StatusCell icon={<Sparkles size={18} />} label="默认模型" value="deepseek-v4-flash" />
+        <StatusCell icon={<Settings2 size={18} />} label="自动抓取" value="未启用定时" />
+        <StatusCell icon={<Sparkles size={18} />} label="默认模型" value={analysisModel} />
         <StatusCell icon={<Mail size={18} />} label="邮件策略" value="新增热点转发" />
-        <StatusCell icon={<RefreshCcw size={18} />} label="采集状态" value={scanStatus} />
+        <StatusCell
+          icon={<RefreshCcw size={18} />}
+          label="采集状态"
+          value={scanStatus}
+          statusKey="collect"
+        />
+        <StatusCell
+          icon={<Sparkles size={18} />}
+          label="AI 分析"
+          value={analysisStatus}
+          statusKey="analyze"
+        />
       </section>
 
       <section className="filter-dock" aria-label="topic filters">
@@ -385,6 +589,9 @@ export function RadarDashboard() {
                   className={keyword.enabled ? "keyword-chip is-enabled" : "keyword-chip"}
                   key={keyword.id}
                   aria-pressed={keyword.enabled}
+                  data-keyword-enabled={String(keyword.enabled)}
+                  data-keyword-id={keyword.id}
+                  disabled={pendingKeywordIds.includes(keyword.id)}
                   type="button"
                   onClick={() => void toggleWatchKeyword(keyword)}
                 >
@@ -503,18 +710,6 @@ export function RadarDashboard() {
             <li>搜索结果必须抓取落地页正文。</li>
             <li>AI 输出必须引用来源 ID。</li>
           </ol>
-          <div className="mini-log" aria-label="collection log">
-            {rawItems.length === 0 ? (
-              <span>暂无真实来源，等待后台采集或点击同步采集</span>
-            ) : (
-              rawItems.slice(0, 5).map((item) => (
-                <a href={item.url} key={item.id} rel="noreferrer" target="_blank">
-                  <strong>{item.sourceName}</strong>
-                  <span>{item.title}</span>
-                </a>
-              ))
-            )}
-          </div>
         </aside>
       </section>
     </main>
@@ -612,6 +807,54 @@ function formatItemTime(value?: string) {
   });
 }
 
+function formatCollectRunStatus(run: CollectRunApiItem) {
+  const startedAt = formatClock(run.startedAt);
+  const finishedAt = run.finishedAt ? formatClock(run.finishedAt) : "";
+
+  if (run.status === "RUNNING") {
+    return `采集中 / ${startedAt} 开始`;
+  }
+
+  if (run.status === "FAILED") {
+    return `失败 / ${finishedAt || startedAt}`;
+  }
+
+  const statusText = run.status === "PARTIAL_SUCCESS" ? "部分完成" : "完成";
+  return `${statusText} / 新增 ${run.newCount} / ${finishedAt || startedAt}`;
+}
+
+function formatAnalysisStatus(data: {
+  analysisConfigured: boolean;
+  pendingRawItems: number;
+  topics: HotTopicApiItem[];
+}) {
+  if (!data.analysisConfigured) {
+    return "未配置 OpenRouter";
+  }
+
+  if (data.pendingRawItems > 0) {
+    return `待分析 ${data.pendingRawItems} 条`;
+  }
+
+  if (data.topics.length > 0) {
+    return `已生成 ${data.topics.length} 个热点`;
+  }
+
+  return "待分析";
+}
+
+function formatClock(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "未知时间";
+  }
+
+  return date.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function getHost(url: string) {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
@@ -623,14 +866,16 @@ function getHost(url: string) {
 function StatusCell({
   icon,
   label,
+  statusKey,
   value
 }: {
   icon: ReactNode;
   label: string;
+  statusKey?: string;
   value: string;
 }) {
   return (
-    <div>
+    <div data-status-key={statusKey}>
       {icon}
       <span>{label}</span>
       <strong>{value}</strong>

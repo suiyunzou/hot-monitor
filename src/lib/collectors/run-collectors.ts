@@ -25,13 +25,12 @@ const collectorMap: Record<CollectorKind, SourceCollector> = {
 
 export async function runCollectors(options: RunCollectorOptions = {}) {
   await ensureDefaultSources();
-  const keywordResult = await collectEnabledKeywordSearches(options.limit);
-
   const selectedKinds = options.keywordOnly
     ? []
     : options.collectors?.length
     ? options.collectors
     : (Object.keys(collectorMap) as CollectorKind[]);
+
   const run = await prisma.collectRun.create({
     data: {
       status: CollectRunStatus.RUNNING,
@@ -39,8 +38,7 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
         selectedKinds,
         limit: options.limit,
         query: options.query,
-        keywordOnly: options.keywordOnly,
-        keywords: keywordResult.keywords.map((keyword) => keyword.keyword)
+        keywordOnly: options.keywordOnly
       })
     }
   });
@@ -50,6 +48,20 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
   let newCount = 0;
 
   try {
+    const keywordResult = await collectEnabledKeywordSearches(options.limit);
+    await prisma.collectRun.update({
+      where: { id: run.id },
+      data: {
+        metadataJson: JSON.stringify({
+          selectedKinds,
+          limit: options.limit,
+          query: options.query,
+          keywordOnly: options.keywordOnly,
+          keywords: keywordResult.keywords.map((keyword) => keyword.keyword)
+        })
+      }
+    });
+
     newCount += await saveCollectedItems(keywordResult.items);
     fetchedCount += keywordResult.items.length;
 
