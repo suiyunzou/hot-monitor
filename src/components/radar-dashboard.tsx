@@ -5,7 +5,6 @@ import {
   BadgeCheck,
   ExternalLink,
   Globe2,
-  Mail,
   MessageCircle,
   Power,
   Radar,
@@ -16,13 +15,15 @@ import {
   Sparkles,
   Zap
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 type TopicStatus = "confirmed" | "multi-source" | "social" | "verify";
 type FilterKey = "all" | TopicStatus;
+type DatePreset = "1d" | "7d";
 
 type Topic = {
+  id: string;
   title: string;
   category: string;
   summary: string;
@@ -32,26 +33,33 @@ type Topic = {
   status: TopicStatus;
   sourceCount: number;
   sourceTypes: string[];
-  sources?: Array<{
-    title: string;
-    url: string;
-    sourceName: string;
-    sourceType: string;
-  }>;
-  time: string;
+  sources: TopicSource[];
+  dateLabel: string;
+  dateValue: string;
+};
+
+type TopicSource = {
+  title: string;
+  url: string;
+  sourceName: string;
+  sourceType: string;
+  excerpt?: string | null;
+  publishedAt?: string | null;
+  fetchedAt?: string | null;
 };
 
 export type RawNewsItem = {
   id: string;
   title: string;
   url: string;
-  excerpt?: string;
+  excerpt?: string | null;
+  content?: string | null;
   sourceName: string;
   sourceType: string;
   credibilityLevel: string;
   watchKeyword?: string | null;
   fetchedAt: string;
-  publishedAt?: string;
+  publishedAt?: string | null;
 };
 
 export type WatchKeyword = {
@@ -94,59 +102,17 @@ export type HotTopicApiItem = {
     sourceType: string;
     sourceName: string;
     credibilityLevel: string;
+    excerpt?: string | null;
+    publishedAt?: string | null;
+    fetchedAt?: string | null;
   }>;
 };
 
-const topics: Topic[] = [
-  {
-    title: "DeepSeek V4 Flash 成为默认分析模型候选",
-    category: "model_release",
-    summary: "OpenRouter 当前 DeepSeek 快速模型适合高频分类、摘要与聚类，默认模型将通过环境变量保留可替换能力。",
-    why: "热点监控系统需要低延迟、高吞吐和稳定结构化输出，快速模型能降低每两小时抓取后的分析成本。",
-    score: 91,
-    confidence: 86,
-    status: "confirmed",
-    sourceCount: 2,
-    sourceTypes: ["Official", "Search"],
-    time: "11:45"
-  },
-  {
-    title: "官方公告优先级高于社交平台转述",
-    category: "product_update",
-    summary: "系统将 OpenAI、Anthropic、Google DeepMind、Meta AI、xAI 等官网作为事实锚点。",
-    why: "这能避免单条推文造成误判，让邮件推送里的结论都能回溯到原始来源。",
-    score: 84,
-    confidence: 92,
-    status: "confirmed",
-    sourceCount: 8,
-    sourceTypes: ["Official"],
-    time: "11:38"
-  },
-  {
-    title: "X 热议只作为早期信号",
-    category: "social_signal",
-    summary: "twitterapi.io 会用于关键词和重点账号搜索，但只有社交来源的事件会标记为待核验。",
-    why: "社交平台适合发现趋势，但不适合单独作为事实依据。",
-    score: 73,
-    confidence: 61,
-    status: "social",
-    sourceCount: 12,
-    sourceTypes: ["X"],
-    time: "11:30"
-  },
-  {
-    title: "搜索落地页正文成为交叉验证入口",
-    category: "verification",
-    summary: "Google/Bing 结果只作为发现入口，系统必须继续抓取落地页正文，才能进入 AI 分析队列。",
-    why: "搜索摘要容易缺上下文，落地页正文能减少标题党和二次转述导致的误判。",
-    score: 79,
-    confidence: 74,
-    status: "multi-source",
-    sourceCount: 5,
-    sourceTypes: ["Search", "Official"],
-    time: "11:18"
-  }
-];
+type RadarDashboardProps = {
+  initialRawItems?: RawNewsItem[];
+  initialHotTopics?: HotTopicApiItem[];
+  initialWatchKeywords?: WatchKeyword[];
+};
 
 const filters: Array<{ key: FilterKey; label: string }> = [
   { key: "all", label: "全部" },
@@ -154,6 +120,11 @@ const filters: Array<{ key: FilterKey; label: string }> = [
   { key: "multi-source", label: "多源线索" },
   { key: "social", label: "社交热议" },
   { key: "verify", label: "待核验" }
+];
+
+const datePresets: Array<{ key: DatePreset; label: string }> = [
+  { key: "1d", label: "1天" },
+  { key: "7d", label: "7天" }
 ];
 
 const statusCopy: Record<TopicStatus, string> = {
@@ -170,23 +141,15 @@ const statusIcon: Record<TopicStatus, ReactNode> = {
   verify: <ShieldAlert size={16} />
 };
 
-type RadarDashboardProps = {
-  initialRawItems?: RawNewsItem[];
-  initialHotTopics?: HotTopicApiItem[];
-  initialWatchKeywords?: WatchKeyword[];
-};
-
 export function RadarDashboard({
   initialRawItems = [],
   initialHotTopics = [],
   initialWatchKeywords = []
 }: RadarDashboardProps) {
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
-  const [activeTopicTitle, setActiveTopicTitle] = useState(
-    () =>
-      initialRawItems[0]?.title ??
-      initialHotTopics[0]?.title ??
-      topics[0].title
+  const [datePreset, setDatePreset] = useState<DatePreset>("7d");
+  const [activeTopicId, setActiveTopicId] = useState(
+    () => initialHotTopics[0]?.id ?? initialRawItems[0]?.id ?? ""
   );
   const [scanPulse, setScanPulse] = useState(0);
   const [rawItems, setRawItems] = useState<RawNewsItem[]>(initialRawItems);
@@ -194,45 +157,72 @@ export function RadarDashboard({
   const [watchKeywords, setWatchKeywords] = useState<WatchKeyword[]>(initialWatchKeywords);
   const [keywordsLoaded, setKeywordsLoaded] = useState(initialWatchKeywords.length > 0);
   const [keywordInput, setKeywordInput] = useState("");
-  const [scanStatus, setScanStatus] = useState("待命");
-  const [analysisStatus, setAnalysisStatus] = useState("待分析");
-  const [analysisModel, setAnalysisModel] = useState("deepseek-v4-flash");
+  const [scanStatus, setScanStatus] = useState("等待自动抓取");
+  const [analysisStatus, setAnalysisStatus] = useState("等待自动分析");
+  const [analysisModel, setAnalysisModel] = useState("deepseek/deepseek-v4-flash");
   const [pendingRawItems, setPendingRawItems] = useState(0);
   const [analysisConfigured, setAnalysisConfigured] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [pendingKeywordIds, setPendingKeywordIds] = useState<string[]>([]);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date>(() => new Date());
+  const [nextRefreshAt, setNextRefreshAt] = useState<Date>(() => addMinutes(new Date(), 60));
+  const [clockNow, setClockNow] = useState<Date>(() => new Date());
+  const lastAutoAnalyzeAt = useRef(0);
+
+  const dateQuery = useMemo(() => buildDateQuery(datePreset), [datePreset]);
+  const refreshSummary = useMemo(
+    () => formatRefreshSummary(lastUpdatedAt, nextRefreshAt, clockNow),
+    [clockNow, lastUpdatedAt, nextRefreshAt]
+  );
 
   const rawItemTopics = useMemo(() => rawItems.map(mapRawItemTopic), [rawItems]);
   const dashboardTopics = useMemo(() => {
-    const linkedUrls = new Set(
-      liveTopics.flatMap((topic) => topic.sources?.map((source) => source.url) ?? [])
-    );
+    const linkedUrls = new Set(liveTopics.flatMap((topic) => topic.sources.map((source) => source.url)));
     const freshRawTopics = rawItemTopics.filter((topic) =>
-      topic.sources?.some((source) => !linkedUrls.has(source.url))
+      topic.sources.some((source) => !linkedUrls.has(source.url))
     );
-    const combined = [...freshRawTopics, ...liveTopics];
-
-    return combined.length > 0 ? combined : topics;
+    return [...liveTopics, ...freshRawTopics].sort(compareTopicDate);
   }, [liveTopics, rawItemTopics]);
   const visibleTopics = useMemo(() => {
     if (activeFilter === "all") {
       return dashboardTopics;
     }
-
     return dashboardTopics.filter((topic) => topic.status === activeFilter);
   }, [activeFilter, dashboardTopics]);
 
   const activeTopic =
-    dashboardTopics.find((topic) => topic.title === activeTopicTitle) ?? visibleTopics[0] ?? dashboardTopics[0];
+    dashboardTopics.find((topic) => topic.id === activeTopicId) ?? visibleTopics[0] ?? dashboardTopics[0];
 
   useEffect(() => {
     document.documentElement.dataset.hotMonitorHydrated = "true";
-    void loadRawItems();
-    void loadHotTopics();
+    void refreshDashboard();
     void loadWatchKeywords();
     void loadCollectStatus();
+
+    const initialTimer = window.setTimeout(() => {
+      void triggerScan({ automatic: true });
+    }, 1200);
+    const hourlyTimer = window.setInterval(() => {
+      void triggerScan({ automatic: true });
+    }, 60 * 60 * 1000);
+    const clockTimer = window.setInterval(() => {
+      setClockNow(new Date());
+    }, 60 * 1000);
+
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(hourlyTimer);
+      window.clearInterval(clockTimer);
+    };
+    // Initial timers should be installed once; date changes are handled below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    void refreshDashboard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateQuery]);
 
   useEffect(() => {
     if (!isScanning) {
@@ -247,13 +237,33 @@ export function RadarDashboard({
   }, [isScanning]);
 
   useEffect(() => {
-    if (!dashboardTopics.some((topic) => topic.title === activeTopicTitle)) {
-      setActiveTopicTitle(dashboardTopics[0]?.title ?? topics[0].title);
+    if (!dashboardTopics.some((topic) => topic.id === activeTopicId)) {
+      setActiveTopicId(dashboardTopics[0]?.id ?? "");
     }
-  }, [activeTopicTitle, dashboardTopics]);
+  }, [activeTopicId, dashboardTopics]);
+
+  useEffect(() => {
+    if (!analysisConfigured || pendingRawItems === 0 || isAnalyzing) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastAutoAnalyzeAt.current < 30_000) {
+      return;
+    }
+
+    lastAutoAnalyzeAt.current = now;
+    void triggerAnalysis();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysisConfigured, pendingRawItems, isAnalyzing]);
+
+  async function refreshDashboard() {
+    await Promise.all([loadRawItems(), loadHotTopics()]);
+    setLastUpdatedAt(new Date());
+  }
 
   async function loadRawItems() {
-    const response = await fetch("/api/raw-items", { cache: "no-store" });
+    const response = await fetch(`/api/raw-items${dateQuery}`, { cache: "no-store" });
     if (!response.ok) {
       return;
     }
@@ -263,7 +273,7 @@ export function RadarDashboard({
   }
 
   async function loadHotTopics() {
-    const response = await fetch("/api/analyze", { cache: "no-store" });
+    const response = await fetch(`/api/analyze${dateQuery}`, { cache: "no-store" });
     if (!response.ok) {
       return;
     }
@@ -297,7 +307,7 @@ export function RadarDashboard({
     const data = (await response.json()) as { latestRuns: CollectRunApiItem[] };
     const latestRun = data.latestRuns[0];
     if (!latestRun) {
-      setScanStatus("待命");
+      setScanStatus("等待自动抓取");
       setIsScanning(false);
       return;
     }
@@ -310,23 +320,19 @@ export function RadarDashboard({
     }
 
     setIsScanning(false);
-    await loadRawItems();
-    await loadHotTopics();
+    await refreshDashboard();
   }
 
   async function addWatchKeyword(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const keyword = keywordInput.trim();
-
     if (!keyword) {
       return;
     }
 
     const response = await fetch("/api/watch-keywords", {
       method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ keyword })
     });
 
@@ -344,68 +350,66 @@ export function RadarDashboard({
     );
 
     try {
-      await fetch(`/api/watch-keywords/${keyword.id}`, {
+      const response = await fetch(`/api/watch-keywords/${keyword.id}`, {
         method: "PATCH",
-        headers: {
-          "content-type": "application/json"
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ enabled: nextEnabled })
       });
+
+      if (!response.ok) {
+        throw new Error("关注词开关保存失败");
+      }
+    } catch (error) {
+      setWatchKeywords((current) =>
+        current.map((item) => (item.id === keyword.id ? { ...item, enabled: keyword.enabled } : item))
+      );
+      setScanStatus(error instanceof Error ? error.message : "关注词开关保存失败");
     } finally {
-      await loadWatchKeywords();
       setPendingKeywordIds((current) => current.filter((id) => id !== keyword.id));
     }
   }
 
-  async function triggerScan() {
+  async function triggerScan(options: { automatic?: boolean } = {}) {
     if (isScanning) {
       return;
     }
 
     setIsScanning(true);
     setScanPulse((value) => value + 1);
-    setScanStatus("采集中");
+    setScanStatus(options.automatic ? "自动抓取中" : "手动抓取中");
+    if (options.automatic) {
+      setNextRefreshAt(addMinutes(new Date(), 60));
+    }
     let keepPolling = false;
 
     try {
       const response = await fetch("/api/collect", {
         method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           collectors: ["search"],
           keywordOnly: watchKeywords.some((keyword) => keyword.enabled),
-          limit: 1,
-          background: true
+          limit: 5,
+          background: true,
+          autoAnalyze: true
         })
       });
       const result = (await response.json()) as {
         status?: string;
-        message?: string;
-        newCount?: number;
         errors?: string[];
-        keywordCount?: number;
-        keywords?: string[];
+        duplicateCount?: number;
       };
 
       if (!response.ok) {
         throw new Error(result.errors?.join("; ") || "collect failed");
       }
 
-      if (result.status === "STARTED") {
-        keepPolling = true;
-        setScanStatus("后台采集中");
-        window.setTimeout(() => {
-          void loadCollectStatus();
-        }, 900);
-        return;
-      }
-
-      const keywordText = result.keywords?.length ? ` / ${result.keywords.join("、")}` : "";
-      setScanStatus(`${result.status ?? "完成"} / 新增 ${result.newCount ?? 0}${keywordText}`);
-      await loadRawItems();
-      await loadHotTopics();
+      keepPolling = true;
+      setNextRefreshAt(addMinutes(new Date(), 60));
+      setScanStatus("后台抓取中");
+      window.setTimeout(() => {
+        void loadCollectStatus();
+      }, 900);
     } catch (error) {
       setScanStatus(error instanceof Error ? error.message : "采集失败");
     } finally {
@@ -421,23 +425,18 @@ export function RadarDashboard({
     }
 
     setIsAnalyzing(true);
-    setAnalysisStatus("分析中");
+    setAnalysisStatus("自动分析中");
 
     try {
       const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          limit: 6
-        })
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ limit: 8 })
       });
       const result = (await response.json()) as {
         analyzedCount?: number;
         topicCount?: number;
         model?: string;
-        message?: string;
         error?: string;
         code?: string;
       };
@@ -447,7 +446,6 @@ export function RadarDashboard({
           setAnalysisStatus("未配置 OpenRouter");
           return;
         }
-
         throw new Error(result.error || "AI 分析失败");
       }
 
@@ -455,14 +453,10 @@ export function RadarDashboard({
         setAnalysisModel(result.model);
       }
 
-      if (result.analyzedCount === 0) {
-        setAnalysisStatus("无新增线索");
-      } else {
-        setAnalysisStatus(`完成 / 新增热点 ${result.topicCount ?? 0}`);
-      }
-
-      await loadRawItems();
-      await loadHotTopics();
+      setAnalysisStatus(
+        result.analyzedCount === 0 ? "暂无新增线索" : `完成 / 新增热点 ${result.topicCount ?? 0}`
+      );
+      await refreshDashboard();
     } catch (error) {
       setAnalysisStatus(error instanceof Error ? error.message : "AI 分析失败");
     } finally {
@@ -470,14 +464,22 @@ export function RadarDashboard({
     }
   }
 
+  function selectTopicFilter(filter: FilterKey) {
+    setActiveFilter(filter);
+  }
+
+  function selectDatePreset(preset: DatePreset) {
+    setDatePreset(preset);
+  }
+
   return (
     <main className="shell">
       <section className="hero">
         <div className="hero__copy">
-          <p className="eyebrow">AI HOT MONITOR / 2H CYCLE</p>
+          <p className="eyebrow">AI HOT MONITOR / 1H AUTO CYCLE</p>
           <h1>AI 情报雷达</h1>
           <p className="hero__lead">
-            只追踪官网、X 信号和 Google/Bing 搜索证据。AI 负责筛选和摘要，事实必须能回到原始链接。
+            自动抓取关注关键词与公开搜索信号，采集完成后自动进入 AI 分析队列。卡片优先展示内容概括、价值判断和来源日期，减少打开原文的次数。
           </p>
           <div className="hero__actions">
             <button
@@ -485,30 +487,10 @@ export function RadarDashboard({
               data-hot-monitor-scan="true"
               type="button"
               disabled={isScanning}
-              onClick={triggerScan}
-              onPointerDown={() => {
-                if (!isScanning) {
-                  setScanStatus("准备采集");
-                }
-              }}
+              onClick={() => void triggerScan()}
             >
               <Zap size={18} />
-              {isScanning ? "采集中" : "同步采集"}
-            </button>
-            <button
-              className="scan-button scan-button--secondary"
-              data-hot-monitor-analyze="true"
-              type="button"
-              disabled={isAnalyzing || (!analysisConfigured && pendingRawItems === 0)}
-              title={
-                analysisConfigured
-                  ? `待分析 ${pendingRawItems} 条原始线索`
-                  : "需要先配置 OPENROUTER_API_KEY"
-              }
-              onClick={triggerAnalysis}
-            >
-              <Sparkles size={18} />
-              {isAnalyzing ? "分析中" : "AI 分析"}
+              {isScanning ? "抓取中" : "立即抓取"}
             </button>
           </div>
         </div>
@@ -526,45 +508,57 @@ export function RadarDashboard({
       </section>
 
       <section className="command-strip" aria-label="system status">
-        <StatusCell icon={<Settings2 size={18} />} label="自动抓取" value="未启用定时" />
+        <StatusCell icon={<Settings2 size={18} />} label="自动抓取" value="每 1 小时" />
         <StatusCell icon={<Sparkles size={18} />} label="默认模型" value={analysisModel} />
-        <StatusCell icon={<Mail size={18} />} label="邮件策略" value="新增热点转发" />
-        <StatusCell
-          icon={<RefreshCcw size={18} />}
-          label="采集状态"
-          value={scanStatus}
-          statusKey="collect"
-        />
-        <StatusCell
-          icon={<Sparkles size={18} />}
-          label="AI 分析"
-          value={analysisStatus}
-          statusKey="analyze"
-        />
+        <StatusCell icon={<Activity size={18} />} label="待分析线索" value={`${pendingRawItems} 条`} />
+        <StatusCell icon={<RefreshCcw size={18} />} label="采集状态" value={scanStatus} statusKey="collect" />
+        <StatusCell icon={<Sparkles size={18} />} label="AI 分析" value={analysisStatus} statusKey="analyze" />
       </section>
 
       <section className="filter-dock" aria-label="topic filters">
-        {filters.map((filter) => (
-          <button
-            className={activeFilter === filter.key ? "filter-dock__item is-active" : "filter-dock__item"}
-            key={filter.key}
-            type="button"
-            onClick={() => setActiveFilter(filter.key)}
-          >
-            {filter.label}
-          </button>
-        ))}
+        <div className="filter-dock__buttons">
+          {filters.map((filter) => (
+            <button
+              className={activeFilter === filter.key ? "filter-dock__item is-active" : "filter-dock__item"}
+              key={filter.key}
+              type="button"
+              onClick={() => selectTopicFilter(filter.key)}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="date-filter" aria-label="news date filters">
+          <div className="date-filter__range" role="group" aria-label="news date range">
+          {datePresets.map((preset) => (
+            <button
+              className={datePreset === preset.key ? "is-active" : ""}
+              key={preset.key}
+              type="button"
+              onClick={() => selectDatePreset(preset.key)}
+            >
+              {preset.label}
+            </button>
+          ))}
+          </div>
+          <p className="refresh-copy">
+            <span>更新于 {refreshSummary.updatedAgo}</span>
+            <span aria-hidden="true">·</span>
+            <span>{refreshSummary.refreshIn}</span>
+          </p>
+        </div>
       </section>
 
       <section className="dashboard">
         <aside className="source-rail" aria-label="source coverage">
           <div className="panel-title">
             <Activity size={18} />
-            <span>来源覆盖</span>
+            <span>来源与关键词</span>
           </div>
-          <SourceMeter label="官方网站" value={72} note="事实锚点" />
-          <SourceMeter label="X / twitterapi.io" value={54} note="早期信号" />
-          <SourceMeter label="Google / Bing" value={63} note="交叉验证" />
+          <SourceMeter label="官方与原始来源" value={72} note="优先作为事实锚点" />
+          <SourceMeter label="搜索发现" value={63} note="用于发现和交叉验证" />
+          <SourceMeter label="社交信号" value={54} note="只作为早期趋势" />
           <form className="keyword-box" onSubmit={addWatchKeyword}>
             <label htmlFor="watch-keyword">关注关键词</label>
             <div>
@@ -589,8 +583,6 @@ export function RadarDashboard({
                   className={keyword.enabled ? "keyword-chip is-enabled" : "keyword-chip"}
                   key={keyword.id}
                   aria-pressed={keyword.enabled}
-                  data-keyword-enabled={String(keyword.enabled)}
-                  data-keyword-id={keyword.id}
                   disabled={pendingKeywordIds.includes(keyword.id)}
                   type="button"
                   onClick={() => void toggleWatchKeyword(keyword)}
@@ -607,63 +599,67 @@ export function RadarDashboard({
             )}
           </div>
           <div className="warning-note">
-            YouTube、哔哩哔哩、RSS、官方 X API 当前阶段不接入。
+            采集结果为 0 时先看采集状态：`fetchedCount=0` 代表没有搜索命中，`fetchedCount&gt;0/newCount=0` 代表命中内容已被 URL 去重。
           </div>
         </aside>
 
         <section className="topic-stack" aria-label="hot topics">
-          {visibleTopics.map((topic, index) => (
-            <article
-              className={`topic topic--${topic.status} ${
-                activeTopic.title === topic.title ? "is-selected" : ""
-              }`}
-              key={topic.title}
-              role="button"
-              style={{ animationDelay: `${index * 90}ms` }}
-              tabIndex={0}
-              onClick={() => setActiveTopicTitle(topic.title)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setActiveTopicTitle(topic.title);
-                }
-              }}
-            >
-              <div className="topic__header">
-                <div>
-                  <span className="topic__status">
-                    {statusIcon[topic.status]}
-                    {statusCopy[topic.status]}
-                  </span>
-                  <h2>{topic.title}</h2>
+          {visibleTopics.length === 0 ? (
+            <div className="empty-state">
+              <strong>当前筛选范围暂无新闻</strong>
+              <span>可放宽日期范围，或等待下一次自动抓取。</span>
+            </div>
+          ) : (
+            visibleTopics.map((topic, index) => (
+              <article
+                className={`topic topic--${topic.status} ${activeTopic?.id === topic.id ? "is-selected" : ""}`}
+                key={topic.id}
+                role="button"
+                style={{ animationDelay: `${index * 60}ms` }}
+                tabIndex={0}
+                onClick={() => setActiveTopicId(topic.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setActiveTopicId(topic.id);
+                  }
+                }}
+              >
+                <div className="topic__header">
+                  <div>
+                    <span className="topic__status">
+                      {statusIcon[topic.status]}
+                      {statusCopy[topic.status]}
+                    </span>
+                    <h2>{topic.title}</h2>
+                  </div>
+                  <div className="score">
+                    <span>{topic.score}</span>
+                    <small>HOT</small>
+                  </div>
                 </div>
-                <div className="score">
-                  <span>{topic.score}</span>
-                  <small>HOT</small>
+
+                <div className="topic__body">
+                  <p className="topic__summary">{topic.summary}</p>
+                  <p className="topic__why">{topic.why}</p>
                 </div>
-              </div>
 
-              <p className="topic__summary">{topic.summary}</p>
-              <p className="topic__why">{topic.why}</p>
+                <div className="topic__meta">
+                  <span>{topic.category}</span>
+                  <span>{topic.sourceCount} 个来源</span>
+                  <span>可信度 {topic.confidence}%</span>
+                  <span>{topic.dateLabel}</span>
+                </div>
 
-              <div className="topic__meta">
-                <span>{topic.category}</span>
-                <span>{topic.sourceCount} 个来源</span>
-                <span>可信度 {topic.confidence}%</span>
-                <span>{topic.time}</span>
-              </div>
+                <div className="source-tags">
+                  {topic.sourceTypes.map((sourceType) => (
+                    <span key={sourceType}>{formatSourceType(sourceType)}</span>
+                  ))}
+                </div>
 
-              <div className="source-tags">
-                {topic.sourceTypes.map((sourceType) => (
-                  <span key={sourceType}>{sourceType}</span>
-                ))}
-              </div>
-
-              {topic.sources && topic.sources.length > 0 ? (
                 <div className="topic-links" aria-label="source links">
                   {topic.sources.slice(0, 4).map((source) => {
                     const host = getHost(source.url);
-
                     return (
                       <a
                         href={source.url}
@@ -689,26 +685,41 @@ export function RadarDashboard({
                     );
                   })}
                 </div>
-              ) : null}
-            </article>
-          ))}
+              </article>
+            ))
+          )}
         </section>
 
         <aside className="audit-panel" aria-label="verification rules">
           <div className="panel-title">
             <ShieldAlert size={18} />
-            <span>核验面板</span>
+            <span>当前焦点</span>
           </div>
-          <div className="focus-card">
-            <span>{statusCopy[activeTopic.status]}</span>
-            <strong>{activeTopic.title}</strong>
-            <p>{activeTopic.why}</p>
-          </div>
+          {activeTopic ? (
+            <div className="focus-card">
+              <span>{statusCopy[activeTopic.status]}</span>
+              <strong>{activeTopic.title}</strong>
+              <p>{activeTopic.summary}</p>
+              <p>{activeTopic.why}</p>
+              <div className="focus-card__meta">
+                <span>{activeTopic.category}</span>
+                <span>可信度 {activeTopic.confidence}%</span>
+                <span>{activeTopic.dateLabel}</span>
+              </div>
+              <div className="focus-card__sources">
+                {activeTopic.sources.slice(0, 5).map((source) => (
+                  <a href={source.url} key={source.url} rel="noreferrer" target="_blank">
+                    {source.sourceName || getHost(source.url) || "来源"}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <ol>
-            <li>没有来源 URL，不进入热点。</li>
-            <li>只有 X 来源，标记为社交热议。</li>
-            <li>搜索结果必须抓取落地页正文。</li>
-            <li>AI 输出必须引用来源 ID。</li>
+            <li>新闻日期优先使用原文发布日期，没有发布日期时使用抓取时间。</li>
+            <li>AI 分析在采集后自动执行，不需要用户悬浮或点击。</li>
+            <li>卡片摘要来自 AI 热点结果；未分析线索使用原始摘要和正文截断。</li>
+            <li>同一来源同一 URL 已存在时会去重，不会重复入库。</li>
           </ol>
         </aside>
       </section>
@@ -717,35 +728,41 @@ export function RadarDashboard({
 }
 
 function mapHotTopic(topic: HotTopicApiItem): Topic {
+  const firstSource = topic.sources[0];
+  const dateValue = firstSource?.publishedAt ?? firstSource?.fetchedAt ?? "";
+
   return {
+    id: topic.id,
     title: topic.title,
     category: topic.category,
-    summary: topic.summary,
-    why: topic.whyItMatters ?? "该热点来自真实采集来源，详情可通过右侧来源链接继续追溯。",
+    summary: trimText(topic.summary, 260),
+    why: trimText(topic.whyItMatters || "该热点来自已采集来源，建议结合底部来源继续核验影响范围。", 220),
     score: topic.hotScore,
     confidence: topic.confidence,
     status: mapTopicStatus(topic.status, topic.needsVerification),
     sourceCount: topic.sources.length,
     sourceTypes: Array.from(new Set(topic.sources.map((source) => source.sourceType))),
-    sources: topic.sources.map((source) => ({
-      title: source.title,
-      url: source.url,
-      sourceName: source.sourceName,
-      sourceType: source.sourceType
-    })),
-    time: "实时"
+    sources: topic.sources,
+    dateLabel: formatDateLabel(dateValue),
+    dateValue
   };
 }
 
 function mapRawItemTopic(item: RawNewsItem): Topic {
   const status = mapRawItemStatus(item.sourceType);
-  const category = item.watchKeyword ? `关注词：${item.watchKeyword}` : "通用采集";
+  const category = item.watchKeyword ? `关注词：${item.watchKeyword}` : "原始线索";
+  const summary = trimText(item.excerpt || item.content || item.title, 260);
+  const why =
+    item.excerpt || item.content
+      ? "这是采集到的原始新闻线索，已尽量展示摘要；AI 自动分析后会生成更稳定的热点评分和影响判断。"
+      : "该来源暂未解析出正文摘要，可通过来源链接继续核验。";
 
   return {
+    id: item.id,
     title: item.title,
     category,
-    summary: item.excerpt || "已采集到真实来源，正文摘要暂未解析完整。",
-    why: "这是搜索或采集返回的原始新闻线索，底部来源链接可直接核验；运行 AI 分析后会进一步生成评分和聚类结果。",
+    summary,
+    why,
     score: item.credibilityLevel === "OFFICIAL" ? 82 : item.sourceType === "TWITTER" ? 56 : 68,
     confidence: item.credibilityLevel === "OFFICIAL" ? 88 : item.sourceType === "TWITTER" ? 52 : 66,
     status,
@@ -756,10 +773,14 @@ function mapRawItemTopic(item: RawNewsItem): Topic {
         title: item.title,
         url: item.url,
         sourceName: item.sourceName,
-        sourceType: item.sourceType
+        sourceType: item.sourceType,
+        excerpt: item.excerpt,
+        publishedAt: item.publishedAt,
+        fetchedAt: item.fetchedAt
       }
     ],
-    time: formatItemTime(item.publishedAt ?? item.fetchedAt)
+    dateLabel: formatDateLabel(item.publishedAt ?? item.fetchedAt),
+    dateValue: item.publishedAt ?? item.fetchedAt
   };
 }
 
@@ -767,15 +788,12 @@ function mapTopicStatus(status: HotTopicApiItem["status"], needsVerification: bo
   if (status === "SOCIAL_BUZZ") {
     return "social";
   }
-
   if (status === "NEEDS_VERIFICATION" || needsVerification) {
     return "verify";
   }
-
   if (status === "MULTI_SOURCE_SIGNAL") {
     return "multi-source";
   }
-
   return "confirmed";
 }
 
@@ -783,64 +801,105 @@ function mapRawItemStatus(sourceType: string): TopicStatus {
   if (sourceType === "TWITTER") {
     return "social";
   }
-
   if (sourceType === "SEARCH") {
     return "multi-source";
   }
-
   return "confirmed";
 }
 
-function formatItemTime(value?: string) {
-  if (!value) {
+function buildDateQuery(preset: DatePreset) {
+  const params = new URLSearchParams();
+  const now = new Date();
+  const start = new Date(now);
+  const days = preset === "1d" ? 0 : 6;
+  start.setDate(now.getDate() - days);
+  params.set("startDate", toDateInputValue(start));
+  params.set("endDate", toDateInputValue(now));
+
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function formatRefreshSummary(lastUpdatedAt: Date, nextRefreshAt: Date, now: Date) {
+  return {
+    updatedAgo: formatUpdatedAgo(now.getTime() - lastUpdatedAt.getTime()),
+    refreshIn: formatRefreshIn(nextRefreshAt.getTime() - now.getTime())
+  };
+}
+
+function formatUpdatedAgo(diffMs: number) {
+  const minutes = Math.max(0, Math.round(diffMs / 60_000));
+
+  if (minutes <= 0) {
     return "刚刚";
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "实时";
+  return `${minutes} 分钟前`;
+}
+
+function formatRefreshIn(diffMs: number) {
+  const minutes = Math.max(0, Math.round(diffMs / 60_000));
+
+  if (minutes <= 0) {
+    return "即将刷新";
   }
 
-  return date.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit"
-  });
+  return `将于 ${minutes} 分钟后刷新`;
+}
+
+function toDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatAnalysisStatus(data: AnalyzeApiResponse) {
+  if (!data.analysisConfigured) {
+    return "未配置 OpenRouter";
+  }
+  if (data.pendingRawItems > 0) {
+    return `待分析 ${data.pendingRawItems} 条`;
+  }
+  if (data.topics.length > 0) {
+    return `已生成 ${data.topics.length} 个热点`;
+  }
+  return "等待自动分析";
 }
 
 function formatCollectRunStatus(run: CollectRunApiItem) {
   const startedAt = formatClock(run.startedAt);
   const finishedAt = run.finishedAt ? formatClock(run.finishedAt) : "";
+  const duplicateCount = parseCollectRunDuplicateCount(run.metadataJson);
 
   if (run.status === "RUNNING") {
     return `采集中 / ${startedAt} 开始`;
   }
-
   if (run.status === "FAILED") {
     return `失败 / ${finishedAt || startedAt}`;
   }
 
   const statusText = run.status === "PARTIAL_SUCCESS" ? "部分完成" : "完成";
-  return `${statusText} / 新增 ${run.newCount} / ${finishedAt || startedAt}`;
+  return `${statusText} / 抓取 ${run.fetchedCount} / 新增 ${run.newCount} / 重复 ${duplicateCount} / ${
+    finishedAt || startedAt
+  }`;
 }
 
-function formatAnalysisStatus(data: {
-  analysisConfigured: boolean;
-  pendingRawItems: number;
-  topics: HotTopicApiItem[];
-}) {
-  if (!data.analysisConfigured) {
-    return "未配置 OpenRouter";
+function parseCollectRunDuplicateCount(metadataJson?: string | null) {
+  if (!metadataJson) {
+    return 0;
   }
 
-  if (data.pendingRawItems > 0) {
-    return `待分析 ${data.pendingRawItems} 条`;
+  try {
+    const metadata = JSON.parse(metadataJson) as { duplicateCount?: number };
+    return metadata.duplicateCount ?? 0;
+  } catch {
+    return 0;
   }
-
-  if (data.topics.length > 0) {
-    return `已生成 ${data.topics.length} 个热点`;
-  }
-
-  return "待分析";
 }
 
 function formatClock(value: string) {
@@ -848,11 +907,43 @@ function formatClock(value: string) {
   if (Number.isNaN(date.getTime())) {
     return "未知时间";
   }
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
 
-  return date.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit"
+function formatDateLabel(value?: string | null) {
+  if (!value) {
+    return "未知日期";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "未知日期";
+  }
+  return date.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
   });
+}
+
+function compareTopicDate(a: Topic, b: Topic) {
+  return new Date(b.dateValue).getTime() - new Date(a.dateValue).getTime();
+}
+
+function trimText(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function formatSourceType(value: string) {
+  const map: Record<string, string> = {
+    OFFICIAL: "官方",
+    SEARCH: "搜索",
+    TWITTER: "X"
+  };
+  return map[value] ?? value;
 }
 
 function getHost(url: string) {
@@ -883,15 +974,7 @@ function StatusCell({
   );
 }
 
-function SourceMeter({
-  label,
-  value,
-  note
-}: {
-  label: string;
-  value: number;
-  note: string;
-}) {
+function SourceMeter({ label, value, note }: { label: string; value: number; note: string }) {
   return (
     <div className="meter">
       <div className="meter__row">

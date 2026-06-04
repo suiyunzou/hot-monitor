@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
+import type { Prisma } from "@/generated/prisma/client";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const dateWhere = buildNewsDateWhere(searchParams);
   const items = await prisma.rawItem.findMany({
+    where: dateWhere,
     orderBy: { fetchedAt: "desc" },
-    take: 40,
+    take: 80,
     include: {
       source: {
         select: {
@@ -23,20 +27,7 @@ export async function GET() {
     }
   });
 
-  const filteredItems = items.filter((item) => isRelevantToWatchKeyword(item.watchKeyword?.keyword, {
-      title: item.title,
-      url: item.url,
-      excerpt: item.excerpt
-    }));
-  const keywordItems = filteredItems.filter((item) => item.watchKeyword);
-  const generalItems = filteredItems.filter(
-    (item) => !item.watchKeyword && item.sourceType !== "SEARCH" && isGeneralAiSignal({
-      title: item.title,
-      url: item.url,
-      excerpt: item.excerpt
-    })
-  );
-  const relevantItems = [...keywordItems, ...generalItems].slice(0, 12);
+  const relevantItems = items.slice(0, 40);
 
   return NextResponse.json({
     items: relevantItems.map((item) => ({
@@ -49,55 +40,56 @@ export async function GET() {
       credibilityLevel: item.credibilityLevel,
       watchKeyword: item.watchKeyword?.keyword ?? null,
       fetchedAt: item.fetchedAt,
-      publishedAt: item.publishedAt
+      publishedAt: item.publishedAt,
+      content: item.content
     }))
   });
 }
 
-function isGeneralAiSignal(item: {
-  title: string;
-  url: string;
-  excerpt: string | null;
-}) {
-  const haystack = `${item.title} ${item.url} ${item.excerpt ?? ""}`.toLowerCase();
-  return [
-    "artificial intelligence",
-    "openai",
-    "anthropic",
-    "claude",
-    "deepseek",
-    "grok",
-    "gemini",
-    "llm",
-    "agentic",
-    "ai agent",
-    "ai model",
-    "model release"
-  ].some((term) => haystack.includes(term));
+function buildNewsDateWhere(searchParams: URLSearchParams): Prisma.RawItemWhereInput | undefined {
+  const start = parseDateParam(searchParams.get("startDate"), "start");
+  const end = parseDateParam(searchParams.get("endDate"), "end");
+
+  if (!start && !end) {
+    return undefined;
+  }
+
+  const range: Prisma.DateTimeFilter = {};
+  if (start) {
+    range.gte = start;
+  }
+  if (end) {
+    range.lte = end;
+  }
+
+  return {
+    OR: [
+      {
+        publishedAt: range
+      },
+      {
+        publishedAt: null,
+        fetchedAt: range
+      }
+    ]
+  };
 }
 
-function isRelevantToWatchKeyword(
-  keyword: string | undefined,
-  item: {
-    title: string;
-    url: string;
-    excerpt: string | null;
-  }
-) {
-  if (!keyword) {
-    return true;
+function parseDateParam(value: string | null, boundary: "start" | "end") {
+  if (!value) {
+    return undefined;
   }
 
-  const terms = keyword
-    .toLowerCase()
-    .split(/\s+/)
-    .map((term) => term.trim())
-    .filter(Boolean);
-
-  if (terms.length === 0) {
-    return true;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
   }
 
-  const haystack = `${item.title} ${item.url} ${item.excerpt ?? ""}`.toLowerCase();
-  return terms.every((term) => haystack.includes(term));
+  if (boundary === "start") {
+    date.setHours(0, 0, 0, 0);
+  } else {
+    date.setHours(23, 59, 59, 999);
+  }
+
+  return date;
 }

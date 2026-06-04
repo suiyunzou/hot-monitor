@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db/prisma";
 import { runCollectors } from "@/lib/collectors/run-collectors";
+import { analyzeRawItems } from "@/lib/ai/analyze-raw-items";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +11,8 @@ const collectRequestSchema = z.object({
   limit: z.number().int().min(1).max(30).optional(),
   query: z.string().min(2).max(240).optional(),
   keywordOnly: z.boolean().optional(),
-  background: z.boolean().optional()
+  background: z.boolean().optional(),
+  autoAnalyze: z.boolean().optional()
 });
 
 export async function GET() {
@@ -46,7 +48,11 @@ export async function POST(request: Request) {
 
   try {
     if (parsed.data.background) {
-      void runCollectors(parsed.data).catch((error) => {
+      void runCollectors(parsed.data).then(async () => {
+        if (parsed.data.autoAnalyze && process.env.OPENROUTER_API_KEY) {
+          await analyzeRawItems(8);
+        }
+      }).catch((error) => {
         console.error("Background collect failed", error);
       });
 
@@ -57,6 +63,11 @@ export async function POST(request: Request) {
     }
 
     const result = await runCollectors(parsed.data);
+    if (parsed.data.autoAnalyze && process.env.OPENROUTER_API_KEY) {
+      const analysis = await analyzeRawItems(8);
+      return NextResponse.json({ ...result, analysis });
+    }
+
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(

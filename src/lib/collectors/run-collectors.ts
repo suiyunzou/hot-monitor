@@ -46,6 +46,8 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
   const errors: string[] = [];
   let fetchedCount = 0;
   let newCount = 0;
+  let duplicateCount = 0;
+  let skippedCount = 0;
 
   try {
     const keywordResult = await collectEnabledKeywordSearches(options.limit);
@@ -62,8 +64,12 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
       }
     });
 
-    newCount += await saveCollectedItems(keywordResult.items);
-    fetchedCount += keywordResult.items.length;
+    const keywordSaveResult = await saveCollectedItems(keywordResult.items);
+    newCount += keywordSaveResult.newCount;
+    duplicateCount += keywordSaveResult.duplicateCount;
+    skippedCount += keywordSaveResult.skippedCount;
+    fetchedCount += keywordResult.fetchedCount;
+    errors.push(...keywordResult.errors);
 
     for (const kind of selectedKinds) {
       const collector = collectorMap[kind];
@@ -74,7 +80,10 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
 
       fetchedCount += result.fetchedCount;
       errors.push(...result.errors);
-      newCount += await saveCollectedItems(result.items);
+      const saveResult = await saveCollectedItems(result.items);
+      newCount += saveResult.newCount;
+      duplicateCount += saveResult.duplicateCount;
+      skippedCount += saveResult.skippedCount;
     }
 
     const status =
@@ -91,7 +100,16 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
         finishedAt: new Date(),
         fetchedCount,
         newCount,
-        errorMessage: errors.length ? errors.slice(0, 8).join("\n") : null
+        errorMessage: errors.length ? errors.slice(0, 8).join("\n") : null,
+        metadataJson: JSON.stringify({
+          selectedKinds,
+          limit: options.limit,
+          query: options.query,
+          keywordOnly: options.keywordOnly,
+          keywords: keywordResult.keywords.map((keyword) => keyword.keyword),
+          duplicateCount,
+          skippedCount
+        })
       }
     });
 
@@ -102,7 +120,9 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
       newCount,
       errors,
       keywordCount: keywordResult.keywords.length,
-      keywords: keywordResult.keywords.map((keyword) => keyword.keyword)
+      keywords: keywordResult.keywords.map((keyword) => keyword.keyword),
+      duplicateCount,
+      skippedCount
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -122,22 +142,25 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
 }
 
 async function collectEnabledKeywordSearches(limit = 2) {
-  const perQueryLimit = Math.max(1, Math.min(limit, 1));
+  const perQueryLimit = Math.max(2, Math.min(limit, 5));
   const keywords = await prisma.watchKeyword.findMany({
     where: { enabled: true },
     orderBy: { createdAt: "desc" },
     take: 20
   });
   const items: CollectedItem[] = [];
+  const errors: string[] = [];
+  let fetchedCount = 0;
 
   for (const keyword of keywords) {
-    const queries = buildKeywordSearchQueries(keyword.keyword).slice(0, 2);
+    const queries = buildKeywordSearchQueries(keyword.keyword).slice(0, 5);
 
     for (const query of queries) {
       const hits = await collectSearchQuery(query, {
         watchKeywordId: keyword.id,
         limit: perQueryLimit
       });
+      fetchedCount += hits.length;
       const relevantHits = hits.filter((hit) => isKeywordRelevant(keyword.keyword, hit));
 
       for (const hit of relevantHits.slice(0, perQueryLimit)) {
@@ -166,8 +189,24 @@ async function collectEnabledKeywordSearches(limit = 2) {
               provider: hit.provider
             }
           });
-        } catch {
-          // Keyword searches are best-effort; failed landing pages are skipped.
+        } catch (error) {
+          items.push({
+            sourceKey: "web-search",
+            watchKeywordId: keyword.id,
+            sourceType: SourceType.SEARCH,
+            credibilityLevel: CredibilityLevel.SEARCH_SNIPPET,
+            url: stripTracking(hit.url),
+            title: hit.title,
+            excerpt: hit.excerpt,
+            metadata: {
+              keyword: keyword.keyword,
+              keywordId: keyword.id,
+              query,
+              provider: hit.provider,
+              snippetOnly: true,
+              extractionError: error instanceof Error ? error.message : String(error)
+            }
+          });
         }
       }
     }
@@ -175,7 +214,9 @@ async function collectEnabledKeywordSearches(limit = 2) {
 
   return {
     items,
-    keywords
+    keywords,
+    fetchedCount,
+    errors
   };
 }
 
@@ -185,6 +226,7 @@ function isKeywordRelevant(
     title: string;
     url: string;
     excerpt?: string;
+    query?: string;
   }
 ) {
   const terms = keyword
@@ -198,7 +240,36 @@ function isKeywordRelevant(
   }
 
   const haystack = `${hit.title} ${hit.url} ${hit.excerpt ?? ""}`.toLowerCase();
-  return terms.every((term) => haystack.includes(term));
+  const expandedTerms = expandKeywordRelevanceTerms(keyword);
+  const query = hit.query?.toLowerCase() ?? "";
+  return (
+    terms.every((term) => haystack.includes(term)) ||
+    expandedTerms.some((term) => haystack.includes(term)) ||
+    expandedTerms.some((term) => query.includes(term))
+  );
+}
+
+function expandKeywordRelevanceTerms(keyword: string) {
+  const compact = keyword.toLowerCase().replace(/\s+/g, "");
+
+  if (compact === "ai编程" || compact === "ai程序" || compact === "ai开发") {
+    return [
+      "ai programming",
+      "ai coding",
+      "ai developer",
+      "ai code",
+      "code assistant",
+      "coding agent",
+      "programming agent",
+      "developer tools",
+      "cursor",
+      "github copilot",
+      "codex",
+      "claude code"
+    ];
+  }
+
+  return [];
 }
 
 export async function ensureDefaultSources() {
@@ -228,6 +299,8 @@ export async function ensureDefaultSources() {
 
 async function saveCollectedItems(items: CollectedItem[]) {
   let newCount = 0;
+  let duplicateCount = 0;
+  let skippedCount = 0;
 
   for (const item of items) {
     const source = await prisma.source.findUnique({
@@ -235,6 +308,7 @@ async function saveCollectedItems(items: CollectedItem[]) {
     });
 
     if (!source) {
+      skippedCount += 1;
       continue;
     }
 
@@ -248,6 +322,7 @@ async function saveCollectedItems(items: CollectedItem[]) {
     });
 
     if (existing) {
+      duplicateCount += 1;
       continue;
     }
 
@@ -273,5 +348,9 @@ async function saveCollectedItems(items: CollectedItem[]) {
     newCount += 1;
   }
 
-  return newCount;
+  return {
+    newCount,
+    duplicateCount,
+    skippedCount
+  };
 }

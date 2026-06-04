@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 import { prisma } from "@/lib/db/prisma";
 import { analyzeRawItems } from "@/lib/ai/analyze-raw-items";
+import type { Prisma } from "@/generated/prisma/client";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +10,12 @@ const analyzeRequestSchema = z.object({
   limit: z.number().int().min(1).max(10).optional()
 });
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const topicWhere = buildTopicNewsDateWhere(searchParams);
   const [topics, pendingRawItems] = await Promise.all([
     prisma.hotTopic.findMany({
+      where: topicWhere,
       orderBy: [{ hotScore: "desc" }, { lastSeenAt: "desc" }],
       take: 12,
       include: {
@@ -23,6 +27,9 @@ export async function GET() {
                 url: true,
                 sourceType: true,
                 credibilityLevel: true,
+                excerpt: true,
+                publishedAt: true,
+                fetchedAt: true,
                 source: {
                   select: {
                     name: true
@@ -60,7 +67,10 @@ export async function GET() {
         url: source.rawItem.url,
         sourceType: source.rawItem.sourceType,
         sourceName: source.rawItem.source.name,
-        credibilityLevel: source.rawItem.credibilityLevel
+        credibilityLevel: source.rawItem.credibilityLevel,
+        excerpt: source.rawItem.excerpt,
+        publishedAt: source.rawItem.publishedAt,
+        fetchedAt: source.rawItem.fetchedAt
       }))
     }))
   });
@@ -111,4 +121,68 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   }
+}
+
+function buildTopicNewsDateWhere(searchParams: URLSearchParams): Prisma.HotTopicWhereInput | undefined {
+  const rawDateWhere = buildRawItemNewsDateWhere(searchParams);
+
+  if (!rawDateWhere) {
+    return undefined;
+  }
+
+  return {
+    sources: {
+      some: {
+        rawItem: rawDateWhere
+      }
+    }
+  };
+}
+
+function buildRawItemNewsDateWhere(searchParams: URLSearchParams): Prisma.RawItemWhereInput | undefined {
+  const start = parseDateParam(searchParams.get("startDate"), "start");
+  const end = parseDateParam(searchParams.get("endDate"), "end");
+
+  if (!start && !end) {
+    return undefined;
+  }
+
+  const range: Prisma.DateTimeFilter = {};
+  if (start) {
+    range.gte = start;
+  }
+  if (end) {
+    range.lte = end;
+  }
+
+  return {
+    OR: [
+      {
+        publishedAt: range
+      },
+      {
+        publishedAt: null,
+        fetchedAt: range
+      }
+    ]
+  };
+}
+
+function parseDateParam(value: string | null, boundary: "start" | "end") {
+  if (!value) {
+    return undefined;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+
+  if (boundary === "start") {
+    date.setHours(0, 0, 0, 0);
+  } else {
+    date.setHours(23, 59, 59, 999);
+  }
+
+  return date;
 }

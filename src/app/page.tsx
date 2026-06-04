@@ -38,30 +38,13 @@ async function getInitialRawItems(): Promise<RawNewsItem[]> {
       }
     }
   });
-  const filteredItems = items.filter((item) =>
-    isRelevantToWatchKeyword(item.watchKeyword?.keyword, {
-      title: item.title,
-      url: item.url,
-      excerpt: item.excerpt
-    })
-  );
-  const keywordItems = filteredItems.filter((item) => item.watchKeyword);
-  const generalItems = filteredItems.filter(
-    (item) =>
-      !item.watchKeyword &&
-      item.sourceType !== "SEARCH" &&
-      isGeneralAiSignal({
-        title: item.title,
-        url: item.url,
-        excerpt: item.excerpt
-      })
-  );
 
-  return [...keywordItems, ...generalItems].slice(0, 12).map((item) => ({
+  return items.slice(0, 40).map((item) => ({
     id: item.id,
     title: item.title,
     url: item.url,
     excerpt: item.excerpt ?? undefined,
+    content: item.content ?? undefined,
     sourceName: item.source.name,
     sourceType: item.source.type,
     credibilityLevel: item.credibilityLevel,
@@ -81,12 +64,15 @@ async function getInitialHotTopics(): Promise<HotTopicApiItem[]> {
           rawItem: {
             select: {
               title: true,
-              url: true,
-              sourceType: true,
-              credibilityLevel: true,
-              source: {
-                select: {
-                  name: true
+                url: true,
+                sourceType: true,
+                credibilityLevel: true,
+                excerpt: true,
+                publishedAt: true,
+                fetchedAt: true,
+                source: {
+                  select: {
+                    name: true
                 }
               }
             }
@@ -111,7 +97,10 @@ async function getInitialHotTopics(): Promise<HotTopicApiItem[]> {
       url: source.rawItem.url,
       sourceType: source.rawItem.sourceType,
       sourceName: source.rawItem.source.name,
-      credibilityLevel: source.rawItem.credibilityLevel
+      credibilityLevel: source.rawItem.credibilityLevel,
+      excerpt: source.rawItem.excerpt,
+      publishedAt: source.rawItem.publishedAt?.toISOString(),
+      fetchedAt: source.rawItem.fetchedAt.toISOString()
     }))
   }));
 }
@@ -126,52 +115,4 @@ async function getInitialWatchKeywords(): Promise<WatchKeyword[]> {
     keyword: keyword.keyword,
     enabled: keyword.enabled
   }));
-}
-
-function isRelevantToWatchKeyword(
-  keyword: string | undefined,
-  item: {
-    title: string;
-    url: string;
-    excerpt: string | null;
-  }
-) {
-  if (!keyword) {
-    return true;
-  }
-
-  const terms = keyword
-    .toLowerCase()
-    .split(/\s+/)
-    .map((term) => term.trim())
-    .filter(Boolean);
-
-  if (terms.length === 0) {
-    return true;
-  }
-
-  const haystack = `${item.title} ${item.url} ${item.excerpt ?? ""}`.toLowerCase();
-  return terms.every((term) => haystack.includes(term));
-}
-
-function isGeneralAiSignal(item: {
-  title: string;
-  url: string;
-  excerpt: string | null;
-}) {
-  const haystack = `${item.title} ${item.url} ${item.excerpt ?? ""}`.toLowerCase();
-  return [
-    "artificial intelligence",
-    "openai",
-    "anthropic",
-    "claude",
-    "deepseek",
-    "grok",
-    "gemini",
-    "llm",
-    "agentic",
-    "ai agent",
-    "ai model",
-    "model release"
-  ].some((term) => haystack.includes(term));
 }
