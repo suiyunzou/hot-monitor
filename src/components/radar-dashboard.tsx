@@ -10,7 +10,6 @@ import {
   Radar,
   RefreshCcw,
   Search,
-  Settings2,
   ShieldAlert,
   Sparkles,
   Zap
@@ -168,6 +167,7 @@ export function RadarDashboard({
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date>(() => new Date());
   const [nextRefreshAt, setNextRefreshAt] = useState<Date>(() => addMinutes(new Date(), 60));
   const [clockNow, setClockNow] = useState<Date>(() => new Date());
+  const [mounted, setMounted] = useState(false);
   const lastAutoAnalyzeAt = useRef(0);
 
   const dateQuery = useMemo(() => buildDateQuery(datePreset), [datePreset]);
@@ -196,6 +196,7 @@ export function RadarDashboard({
 
   useEffect(() => {
     document.documentElement.dataset.hotMonitorHydrated = "true";
+    setMounted(true);
     void refreshDashboard();
     void loadWatchKeywords();
     void loadCollectStatus();
@@ -474,46 +475,49 @@ export function RadarDashboard({
 
   return (
     <main className="shell">
-      <section className="hero">
-        <div className="hero__copy">
-          <p className="eyebrow">AI HOT MONITOR / 1H AUTO CYCLE</p>
-          <h1>AI 情报雷达</h1>
-          <p className="hero__lead">
-            自动抓取关注关键词与公开搜索信号，采集完成后自动进入 AI 分析队列。卡片优先展示内容概括、价值判断和来源日期，减少打开原文的次数。
-          </p>
-          <div className="hero__actions">
-            <button
-              className="scan-button"
-              data-hot-monitor-scan="true"
-              type="button"
-              disabled={isScanning}
-              onClick={() => void triggerScan()}
-            >
-              <Zap size={18} />
-              {isScanning ? "抓取中" : "立即抓取"}
-            </button>
+      <header className="topbar">
+        <div className="topbar__brand">
+          <div className={`radar-mark radar-mark--scan-${scanPulse % 2}`} aria-label="monitoring radar">
+            <span className="radar-mark__sweep" />
+            <span className="radar-mark__ring" />
+            <Radar className="radar-mark__icon" size={20} />
+          </div>
+          <div className="topbar__heading">
+            <p className="eyebrow">AI HOT MONITOR / 1H AUTO CYCLE</p>
+            <h1>AI 情报雷达</h1>
           </div>
         </div>
 
-        <div className={`pulse pulse--scan-${scanPulse % 2}`} aria-label="monitoring radar">
-          <div className="pulse__sweep" />
-          <div className="pulse__ring pulse__ring--one" />
-          <div className="pulse__ring pulse__ring--two" />
-          <div className="pulse__ring pulse__ring--three" />
-          <Radar className="pulse__icon" size={54} />
-          <span className="pulse__dot pulse__dot--a" />
-          <span className="pulse__dot pulse__dot--b" />
-          <span className="pulse__dot pulse__dot--c" />
+        <div className="topbar__status" aria-label="system status">
+          <StatusPill
+            icon={<RefreshCcw size={14} />}
+            label="采集"
+            value={scanStatus}
+            tone={isScanning ? "running" : "idle"}
+          />
+          <StatusPill
+            icon={<Sparkles size={14} />}
+            label="AI 分析"
+            value={analysisStatus}
+            title={`默认模型 ${analysisModel}`}
+            tone={isAnalyzing ? "running" : "idle"}
+          />
+          <StatusPill icon={<Activity size={14} />} label="待分析" value={`${pendingRawItems} 条`} />
         </div>
-      </section>
 
-      <section className="command-strip" aria-label="system status">
-        <StatusCell icon={<Settings2 size={18} />} label="自动抓取" value="每 1 小时" />
-        <StatusCell icon={<Sparkles size={18} />} label="默认模型" value={analysisModel} />
-        <StatusCell icon={<Activity size={18} />} label="待分析线索" value={`${pendingRawItems} 条`} />
-        <StatusCell icon={<RefreshCcw size={18} />} label="采集状态" value={scanStatus} statusKey="collect" />
-        <StatusCell icon={<Sparkles size={18} />} label="AI 分析" value={analysisStatus} statusKey="analyze" />
-      </section>
+        <div className="topbar__actions">
+          <button
+            className="scan-button"
+            data-hot-monitor-scan="true"
+            type="button"
+            disabled={isScanning}
+            onClick={() => void triggerScan()}
+          >
+            <Zap size={18} />
+            {isScanning ? "抓取中" : "立即抓取"}
+          </button>
+        </div>
+      </header>
 
       <section className="filter-dock" aria-label="topic filters">
         <div className="filter-dock__buttons">
@@ -542,10 +546,16 @@ export function RadarDashboard({
             </button>
           ))}
           </div>
-          <p className="refresh-copy">
-            <span>更新于 {refreshSummary.updatedAgo}</span>
-            <span aria-hidden="true">·</span>
-            <span>{refreshSummary.refreshIn}</span>
+          <p className="refresh-copy" suppressHydrationWarning>
+            {mounted ? (
+              <>
+                <span>更新于 {refreshSummary.updatedAgo}</span>
+                <span aria-hidden="true">·</span>
+                <span>{refreshSummary.refreshIn}</span>
+              </>
+            ) : (
+              <span>同步中…</span>
+            )}
           </p>
         </div>
       </section>
@@ -597,9 +607,6 @@ export function RadarDashboard({
                 </button>
               ))
             )}
-          </div>
-          <div className="warning-note">
-            采集结果为 0 时先看采集状态：`fetchedCount=0` 代表没有搜索命中，`fetchedCount&gt;0/newCount=0` 代表命中内容已被 URL 去重。
           </div>
         </aside>
 
@@ -954,19 +961,21 @@ function getHost(url: string) {
   }
 }
 
-function StatusCell({
+function StatusPill({
   icon,
   label,
-  statusKey,
-  value
+  value,
+  title,
+  tone = "idle"
 }: {
   icon: ReactNode;
   label: string;
-  statusKey?: string;
   value: string;
+  title?: string;
+  tone?: "idle" | "running";
 }) {
   return (
-    <div data-status-key={statusKey}>
+    <div className="status-pill" data-tone={tone} title={title}>
       {icon}
       <span>{label}</span>
       <strong>{value}</strong>
