@@ -119,6 +119,23 @@ export const aiSearchQueries = [
 
 export const twitterQueries = [
   "(AI OR LLM OR OpenAI OR Claude OR DeepSeek OR Gemini OR xAI) min_faves:50",
-  "(agent OR agents OR \"AI coding\" OR \"model release\") min_faves:30",
-  "(from:OpenAI OR from:AnthropicAI OR from:GoogleDeepMind OR from:xai OR from:deepseek_ai)"
+  "(agent OR agents OR \"AI coding\" OR \"model release\") min_faves:30"
+];
+
+// Seed list for the KOL whitelist; users then manage it in the UI.
+// tier 1 = 官方/机构账号, tier 2 = 领域大 V/研究者.
+export const defaultKolAccounts: Array<{ handle: string; displayName: string; tier: number }> = [
+  { handle: "OpenAI", displayName: "OpenAI", tier: 1 },
+  { handle: "AnthropicAI", displayName: "Anthropic", tier: 1 },
+  { handle: "GoogleDeepMind", displayName: "Google DeepMind", tier: 1 },
+  { handle: "xai", displayName: "xAI", tier: 1 },
+  { handle: "deepseek_ai", displayName: "DeepSeek", tier: 1 },
+  { handle: "huggingface", displayName: "Hugging Face", tier: 1 },
+  { handle: "MistralAI", displayName: "Mistral AI", tier: 1 },
+  { handle: "sama", displayName: "Sam Altman", tier: 2 },
+  { handle: "karpathy", displayName: "Andrej Karpathy", tier: 2 },
+  { handle: "ylecun", displayName: "Yann LeCun", tier: 2 },
+  { handle: "AndrewYNg", displayName: "Andrew Ng", tier: 2 },
+  { handle: "_akhaliq", displayName: "AK", tier: 2 },
+  { handle: "swyx", displayName: "swyx", tier: 2 }
 ];

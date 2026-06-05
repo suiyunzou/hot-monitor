@@ -4,14 +4,20 @@ import {
   Activity,
   BadgeCheck,
   ExternalLink,
+  Eye,
   Globe2,
+  Heart,
+  Mail,
   MessageCircle,
   Power,
   Radar,
   RefreshCcw,
   Search,
+  Send,
   ShieldAlert,
   Sparkles,
+  Trash2,
+  Users,
   Zap
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -33,6 +39,7 @@ type Topic = {
   sourceCount: number;
   sourceTypes: string[];
   sources: TopicSource[];
+  engagement?: TopicEngagement | null;
   dateLabel: string;
   dateValue: string;
 };
@@ -45,25 +52,29 @@ type TopicSource = {
   excerpt?: string | null;
   publishedAt?: string | null;
   fetchedAt?: string | null;
+  viewCount?: number | null;
+  likeCount?: number | null;
+  retweetCount?: number | null;
+  replyCount?: number | null;
 };
 
-export type RawNewsItem = {
-  id: string;
-  title: string;
-  url: string;
-  excerpt?: string | null;
-  content?: string | null;
-  sourceName: string;
-  sourceType: string;
-  credibilityLevel: string;
-  watchKeyword?: string | null;
-  fetchedAt: string;
-  publishedAt?: string | null;
+type TopicEngagement = {
+  views?: number | null;
+  likes?: number | null;
+  replies?: number | null;
 };
 
 export type WatchKeyword = {
   id: string;
   keyword: string;
+  enabled: boolean;
+};
+
+export type KolAccount = {
+  id: string;
+  handle: string;
+  displayName?: string | null;
+  tier: number;
   enabled: boolean;
 };
 
@@ -104,11 +115,14 @@ export type HotTopicApiItem = {
     excerpt?: string | null;
     publishedAt?: string | null;
     fetchedAt?: string | null;
+    viewCount?: number | null;
+    likeCount?: number | null;
+    retweetCount?: number | null;
+    replyCount?: number | null;
   }>;
 };
 
 type RadarDashboardProps = {
-  initialRawItems?: RawNewsItem[];
   initialHotTopics?: HotTopicApiItem[];
   initialWatchKeywords?: WatchKeyword[];
 };
@@ -141,17 +155,13 @@ const statusIcon: Record<TopicStatus, ReactNode> = {
 };
 
 export function RadarDashboard({
-  initialRawItems = [],
   initialHotTopics = [],
   initialWatchKeywords = []
 }: RadarDashboardProps) {
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
   const [datePreset, setDatePreset] = useState<DatePreset>("7d");
-  const [activeTopicId, setActiveTopicId] = useState(
-    () => initialHotTopics[0]?.id ?? initialRawItems[0]?.id ?? ""
-  );
+  const [activeTopicId, setActiveTopicId] = useState(() => initialHotTopics[0]?.id ?? "");
   const [scanPulse, setScanPulse] = useState(0);
-  const [rawItems, setRawItems] = useState<RawNewsItem[]>(initialRawItems);
   const [liveTopics, setLiveTopics] = useState<Topic[]>(() => initialHotTopics.map(mapHotTopic));
   const [watchKeywords, setWatchKeywords] = useState<WatchKeyword[]>(initialWatchKeywords);
   const [keywordsLoaded, setKeywordsLoaded] = useState(initialWatchKeywords.length > 0);
@@ -163,6 +173,16 @@ export function RadarDashboard({
   const [analysisConfigured, setAnalysisConfigured] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [emailConfigured, setEmailConfigured] = useState(false);
+  const [emailRecipient, setEmailRecipient] = useState<string | null>(null);
+  const [unsentTopicCount, setUnsentTopicCount] = useState(0);
+  const [emailStatus, setEmailStatus] = useState("尚未发送");
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [kolAccounts, setKolAccounts] = useState<KolAccount[]>([]);
+  const [kolLoaded, setKolLoaded] = useState(false);
+  const [kolHandleInput, setKolHandleInput] = useState("");
+  const [kolTierInput, setKolTierInput] = useState<1 | 2>(2);
+  const [pendingKolIds, setPendingKolIds] = useState<string[]>([]);
   const [pendingKeywordIds, setPendingKeywordIds] = useState<string[]>([]);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date>(() => new Date());
   const [nextRefreshAt, setNextRefreshAt] = useState<Date>(() => addMinutes(new Date(), 60));
@@ -176,14 +196,9 @@ export function RadarDashboard({
     [clockNow, lastUpdatedAt, nextRefreshAt]
   );
 
-  const rawItemTopics = useMemo(() => rawItems.map(mapRawItemTopic), [rawItems]);
-  const dashboardTopics = useMemo(() => {
-    const linkedUrls = new Set(liveTopics.flatMap((topic) => topic.sources.map((source) => source.url)));
-    const freshRawTopics = rawItemTopics.filter((topic) =>
-      topic.sources.some((source) => !linkedUrls.has(source.url))
-    );
-    return [...liveTopics, ...freshRawTopics].sort(compareTopicDate);
-  }, [liveTopics, rawItemTopics]);
+  // Only AI-analyzed (Chinese, scored) topics become cards. Raw collected items
+  // stay as a "分析中" count until the pipeline summarizes + translates them.
+  const dashboardTopics = useMemo(() => [...liveTopics].sort(compareTopicDate), [liveTopics]);
   const visibleTopics = useMemo(() => {
     if (activeFilter === "all") {
       return dashboardTopics;
@@ -200,6 +215,8 @@ export function RadarDashboard({
     void refreshDashboard();
     void loadWatchKeywords();
     void loadCollectStatus();
+    void loadEmailStatus();
+    void loadKolAccounts();
 
     const initialTimer = window.setTimeout(() => {
       void triggerScan({ automatic: true });
@@ -259,18 +276,8 @@ export function RadarDashboard({
   }, [analysisConfigured, pendingRawItems, isAnalyzing]);
 
   async function refreshDashboard() {
-    await Promise.all([loadRawItems(), loadHotTopics()]);
+    await loadHotTopics();
     setLastUpdatedAt(new Date());
-  }
-
-  async function loadRawItems() {
-    const response = await fetch(`/api/raw-items${dateQuery}`, { cache: "no-store" });
-    if (!response.ok) {
-      return;
-    }
-
-    const data = (await response.json()) as { items: RawNewsItem[] };
-    setRawItems(data.items);
   }
 
   async function loadHotTopics() {
@@ -297,6 +304,152 @@ export function RadarDashboard({
     const data = (await response.json()) as { keywords: WatchKeyword[] };
     setWatchKeywords(data.keywords);
     setKeywordsLoaded(true);
+  }
+
+  async function loadEmailStatus() {
+    const response = await fetch("/api/email", { cache: "no-store" });
+    if (!response.ok) {
+      return;
+    }
+
+    const data = (await response.json()) as {
+      configured: boolean;
+      recipient: string | null;
+      unsentCount: number;
+      digests: Array<{ status: string; topicCount: number; sentAt?: string | null }>;
+    };
+
+    setEmailConfigured(data.configured);
+    setEmailRecipient(data.recipient);
+    setUnsentTopicCount(data.unsentCount);
+
+    const lastSuccess = data.digests.find((digest) => digest.status === "SUCCESS");
+    if (lastSuccess?.sentAt) {
+      setEmailStatus(`上次发送 ${formatClock(lastSuccess.sentAt)} · ${lastSuccess.topicCount} 条`);
+    } else if (!data.configured) {
+      setEmailStatus("未配置 SMTP");
+    } else {
+      setEmailStatus("尚未发送");
+    }
+  }
+
+  async function sendEmailDigest() {
+    if (isSendingEmail) {
+      return;
+    }
+
+    setIsSendingEmail(true);
+    setEmailStatus("发送中");
+
+    try {
+      const response = await fetch("/api/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ limit: 10 })
+      });
+      const result = (await response.json()) as {
+        sent?: boolean;
+        reason?: string;
+        topicCount?: number;
+        error?: string;
+        code?: string;
+      };
+
+      if (!response.ok) {
+        if (result.code === "EMAIL_NOT_CONFIGURED") {
+          setEmailStatus("未配置 SMTP");
+          return;
+        }
+        throw new Error(result.error || "邮件发送失败");
+      }
+
+      if (result.sent) {
+        setEmailStatus(`已发送 ${result.topicCount ?? 0} 条`);
+      } else if (result.reason === "NO_NEW_TOPICS") {
+        setEmailStatus("暂无新增热点可发送");
+      } else {
+        setEmailStatus("未发送");
+      }
+
+      await loadEmailStatus();
+    } catch (error) {
+      setEmailStatus(error instanceof Error ? error.message : "邮件发送失败");
+    } finally {
+      setIsSendingEmail(false);
+    }
+  }
+
+  async function loadKolAccounts() {
+    const response = await fetch("/api/kol-accounts", { cache: "no-store" });
+    if (!response.ok) {
+      setKolLoaded(true);
+      return;
+    }
+
+    const data = (await response.json()) as { accounts: KolAccount[] };
+    setKolAccounts(data.accounts);
+    setKolLoaded(true);
+  }
+
+  async function addKolAccount(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const handle = kolHandleInput.trim().replace(/^@/, "");
+    if (!handle) {
+      return;
+    }
+
+    const response = await fetch("/api/kol-accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ handle, tier: kolTierInput })
+    });
+
+    if (response.ok) {
+      setKolHandleInput("");
+      await loadKolAccounts();
+    }
+  }
+
+  async function toggleKolAccount(account: KolAccount) {
+    const nextEnabled = !account.enabled;
+    setPendingKolIds((current) => [...current, account.id]);
+    setKolAccounts((current) =>
+      current.map((item) => (item.id === account.id ? { ...item, enabled: nextEnabled } : item))
+    );
+
+    try {
+      const response = await fetch(`/api/kol-accounts/${account.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: nextEnabled })
+      });
+      if (!response.ok) {
+        throw new Error("KOL 开关保存失败");
+      }
+    } catch {
+      setKolAccounts((current) =>
+        current.map((item) => (item.id === account.id ? { ...item, enabled: account.enabled } : item))
+      );
+    } finally {
+      setPendingKolIds((current) => current.filter((id) => id !== account.id));
+    }
+  }
+
+  async function deleteKolAccount(account: KolAccount) {
+    setPendingKolIds((current) => [...current, account.id]);
+    const previous = kolAccounts;
+    setKolAccounts((current) => current.filter((item) => item.id !== account.id));
+
+    try {
+      const response = await fetch(`/api/kol-accounts/${account.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("删除失败");
+      }
+    } catch {
+      setKolAccounts(previous);
+    } finally {
+      setPendingKolIds((current) => current.filter((id) => id !== account.id));
+    }
   }
 
   async function loadCollectStatus() {
@@ -608,13 +761,113 @@ export function RadarDashboard({
               ))
             )}
           </div>
+
+          <div className="kol-box" aria-label="kol whitelist">
+            <div className="kol-box__head">
+              <Users size={16} />
+              <span>关注账号 · X KOL</span>
+            </div>
+            <form className="kol-form" onSubmit={addKolAccount}>
+              <input
+                aria-label="KOL handle"
+                maxLength={40}
+                onChange={(event) => setKolHandleInput(event.target.value)}
+                placeholder="@handle 如 sama"
+                value={kolHandleInput}
+              />
+              <select
+                aria-label="KOL 层级"
+                value={kolTierInput}
+                onChange={(event) => setKolTierInput(Number(event.target.value) === 1 ? 1 : 2)}
+              >
+                <option value={1}>官方</option>
+                <option value={2}>大V</option>
+              </select>
+              <button type="submit">添加</button>
+            </form>
+            <div className="kol-list">
+              {!kolLoaded ? (
+                <span className="keyword-empty">正在读取关注账号</span>
+              ) : kolAccounts.length === 0 ? (
+                <span className="keyword-empty">暂无关注账号</span>
+              ) : (
+                kolAccounts.map((account) => (
+                  <div
+                    className={account.enabled ? "kol-item is-enabled" : "kol-item"}
+                    key={account.id}
+                  >
+                    <button
+                      className="kol-item__main"
+                      type="button"
+                      aria-pressed={account.enabled}
+                      disabled={pendingKolIds.includes(account.id)}
+                      onClick={() => void toggleKolAccount(account)}
+                      title={account.enabled ? "点击停用" : "点击启用"}
+                    >
+                      <span className={account.tier === 1 ? "kol-tier kol-tier--official" : "kol-tier"}>
+                        {account.tier === 1 ? "官方" : "大V"}
+                      </span>
+                      <span className="kol-item__handle">@{account.handle}</span>
+                      <strong>{account.enabled ? "启用" : "停用"}</strong>
+                    </button>
+                    <button
+                      className="kol-item__delete"
+                      type="button"
+                      aria-label={`删除 ${account.handle}`}
+                      disabled={pendingKolIds.includes(account.id)}
+                      onClick={() => void deleteKolAccount(account)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="email-box" aria-label="email digest">
+            <div className="email-box__head">
+              <Mail size={16} />
+              <span>邮件日报</span>
+              <em className={emailConfigured ? "email-box__dot is-on" : "email-box__dot"} aria-hidden="true" />
+            </div>
+            <p className="email-box__status">{emailStatus}</p>
+            <p className="email-box__meta">
+              {emailConfigured
+                ? `收件人 ${emailRecipient ?? "—"} · 待发送 ${unsentTopicCount} 条`
+                : "在环境变量填写 SMTP 配置后启用，未发送过的热点不会重复推送。"}
+            </p>
+            <button
+              className="email-box__send"
+              type="button"
+              disabled={isSendingEmail || !emailConfigured}
+              onClick={() => void sendEmailDigest()}
+            >
+              <Send size={14} />
+              {isSendingEmail ? "发送中" : "发送热点日报"}
+            </button>
+          </div>
         </aside>
 
         <section className="topic-stack" aria-label="hot topics">
           {visibleTopics.length === 0 ? (
             <div className="empty-state">
-              <strong>当前筛选范围暂无新闻</strong>
-              <span>可放宽日期范围，或等待下一次自动抓取。</span>
+              {!analysisConfigured ? (
+                <>
+                  <strong>未配置 OpenRouter，暂无法分析与翻译</strong>
+                  <span>配置 OPENROUTER_API_KEY 后，采集到的线索会自动概括、翻译为中文并打分展示。</span>
+                </>
+              ) : pendingRawItems > 0 ? (
+                <>
+                  <strong>已采集 {pendingRawItems} 条线索，正在分析翻译…</strong>
+                  <span>采集后自动进入 AI 分析与中文翻译队列，完成后在此展示为卡片。</span>
+                </>
+              ) : (
+                <>
+                  <strong>当前筛选范围暂无新闻</strong>
+                  <span>可放宽日期范围，或等待下一次自动抓取。</span>
+                </>
+              )}
             </div>
           ) : (
             visibleTopics.map((topic, index) => (
@@ -642,7 +895,7 @@ export function RadarDashboard({
                   </div>
                   <div className="score">
                     <span>{topic.score}</span>
-                    <small>HOT</small>
+                    <small>热度</small>
                   </div>
                 </div>
 
@@ -654,9 +907,23 @@ export function RadarDashboard({
                 <div className="topic__meta">
                   <span>{topic.category}</span>
                   <span>{topic.sourceCount} 个来源</span>
-                  <span>可信度 {topic.confidence}%</span>
+                  <span className="topic__cred">可信度 {topic.confidence}%</span>
                   <span>{topic.dateLabel}</span>
                 </div>
+
+                {topic.engagement ? (
+                  <div className="topic__engagement" aria-label="x engagement">
+                    {topic.engagement.views != null ? (
+                      <span><Eye size={13} />{formatCount(topic.engagement.views)}</span>
+                    ) : null}
+                    {topic.engagement.likes != null ? (
+                      <span><Heart size={13} />{formatCount(topic.engagement.likes)}</span>
+                    ) : null}
+                    {topic.engagement.replies != null ? (
+                      <span><MessageCircle size={13} />{formatCount(topic.engagement.replies)}</span>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div className="source-tags">
                   {topic.sourceTypes.map((sourceType) => (
@@ -750,45 +1017,25 @@ function mapHotTopic(topic: HotTopicApiItem): Topic {
     sourceCount: topic.sources.length,
     sourceTypes: Array.from(new Set(topic.sources.map((source) => source.sourceType))),
     sources: topic.sources,
+    engagement: pickTopEngagement(topic.sources),
     dateLabel: formatDateLabel(dateValue),
     dateValue
   };
 }
 
-function mapRawItemTopic(item: RawNewsItem): Topic {
-  const status = mapRawItemStatus(item.sourceType);
-  const category = item.watchKeyword ? `关注词：${item.watchKeyword}` : "原始线索";
-  const summary = trimText(item.excerpt || item.content || item.title, 260);
-  const why =
-    item.excerpt || item.content
-      ? "这是采集到的原始新闻线索，已尽量展示摘要；AI 自动分析后会生成更稳定的热点评分和影响判断。"
-      : "该来源暂未解析出正文摘要，可通过来源链接继续核验。";
+/** Engagement of the most-liked tweet source, for the card's metric chips. */
+function pickTopEngagement(sources: HotTopicApiItem["sources"]): TopicEngagement | null {
+  const tweets = sources.filter(
+    (source) => source.sourceType === "TWITTER" && (source.viewCount != null || source.likeCount != null)
+  );
+  if (tweets.length === 0) {
+    return null;
+  }
 
-  return {
-    id: item.id,
-    title: item.title,
-    category,
-    summary,
-    why,
-    score: item.credibilityLevel === "OFFICIAL" ? 82 : item.sourceType === "TWITTER" ? 56 : 68,
-    confidence: item.credibilityLevel === "OFFICIAL" ? 88 : item.sourceType === "TWITTER" ? 52 : 66,
-    status,
-    sourceCount: 1,
-    sourceTypes: [item.sourceType],
-    sources: [
-      {
-        title: item.title,
-        url: item.url,
-        sourceName: item.sourceName,
-        sourceType: item.sourceType,
-        excerpt: item.excerpt,
-        publishedAt: item.publishedAt,
-        fetchedAt: item.fetchedAt
-      }
-    ],
-    dateLabel: formatDateLabel(item.publishedAt ?? item.fetchedAt),
-    dateValue: item.publishedAt ?? item.fetchedAt
-  };
+  const top = tweets.reduce((best, current) =>
+    (current.likeCount ?? 0) > (best.likeCount ?? 0) ? current : best
+  );
+  return { views: top.viewCount, likes: top.likeCount, replies: top.replyCount };
 }
 
 function mapTopicStatus(status: HotTopicApiItem["status"], needsVerification: boolean): TopicStatus {
@@ -799,16 +1046,6 @@ function mapTopicStatus(status: HotTopicApiItem["status"], needsVerification: bo
     return "verify";
   }
   if (status === "MULTI_SOURCE_SIGNAL") {
-    return "multi-source";
-  }
-  return "confirmed";
-}
-
-function mapRawItemStatus(sourceType: string): TopicStatus {
-  if (sourceType === "TWITTER") {
-    return "social";
-  }
-  if (sourceType === "SEARCH") {
     return "multi-source";
   }
   return "confirmed";
@@ -959,6 +1196,16 @@ function getHost(url: string) {
   } catch {
     return "";
   }
+}
+
+function formatCount(value: number) {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return `${value}`;
 }
 
 function StatusPill({

@@ -1,6 +1,6 @@
 import { CollectRunStatus } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/db/prisma";
-import { allDefaultSources } from "./default-sources";
+import { allDefaultSources, defaultKolAccounts } from "./default-sources";
 import { buildKeywordSearchQueries } from "@/lib/watch-keywords/search-queries";
 import { OfficialCollector } from "./official";
 import { collectSearchQuery, SearchCollector } from "./search";
@@ -25,6 +25,7 @@ const collectorMap: Record<CollectorKind, SourceCollector> = {
 
 export async function runCollectors(options: RunCollectorOptions = {}) {
   await ensureDefaultSources();
+  await ensureDefaultKolAccounts();
   const selectedKinds = options.keywordOnly
     ? []
     : options.collectors?.length
@@ -71,11 +72,17 @@ export async function runCollectors(options: RunCollectorOptions = {}) {
     fetchedCount += keywordResult.fetchedCount;
     errors.push(...keywordResult.errors);
 
+    const kolAccounts = await prisma.kolAccount.findMany({
+      where: { enabled: true },
+      select: { handle: true, tier: true }
+    });
+
     for (const kind of selectedKinds) {
       const collector = collectorMap[kind];
       const result = await collector.collect({
         limit: options.limit,
-        query: options.query
+        query: options.query,
+        kolAccounts
       });
 
       fetchedCount += result.fetchedCount;
@@ -272,6 +279,26 @@ function expandKeywordRelevanceTerms(keyword: string) {
   return [];
 }
 
+// Seed the KOL whitelist once (only when empty) so X collection works out of
+// the box; afterwards the user owns the list via the UI.
+export async function ensureDefaultKolAccounts() {
+  const count = await prisma.kolAccount.count();
+  if (count > 0) {
+    return;
+  }
+
+  for (const account of defaultKolAccounts) {
+    await prisma.kolAccount.create({
+      data: {
+        handle: account.handle,
+        displayName: account.displayName,
+        tier: account.tier,
+        enabled: true
+      }
+    });
+  }
+}
+
 export async function ensureDefaultSources() {
   for (const source of allDefaultSources) {
     await prisma.source.upsert({
@@ -341,6 +368,11 @@ async function saveCollectedItems(items: CollectedItem[]) {
         publishedAt: item.publishedAt,
         sourceType: item.sourceType,
         credibilityLevel: item.credibilityLevel,
+        viewCount: item.viewCount,
+        likeCount: item.likeCount,
+        retweetCount: item.retweetCount,
+        replyCount: item.replyCount,
+        engagementScore: item.engagementScore,
         metadataJson: item.metadata ? JSON.stringify(item.metadata) : undefined
       }
     });

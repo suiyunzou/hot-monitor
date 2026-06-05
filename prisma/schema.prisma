@@ -78,6 +78,13 @@ model RawItem {
   credibilityLevel CredibilityLevel
   status           RawItemStatus    @default(NEW)
   metadataJson     String?
+  titleZh          String?
+  excerptZh        String?
+  viewCount        Int?
+  likeCount        Int?
+  retweetCount     Int?
+  replyCount       Int?
+  engagementScore  Int?
   topicLinks       TopicSource[]
 
   @@unique([sourceId, url])
@@ -85,6 +92,7 @@ model RawItem {
   @@index([fetchedAt])
   @@index([sourceType])
   @@index([watchKeywordId])
+  @@index([engagementScore])
 }
 
 model WatchKeyword {
@@ -96,6 +104,19 @@ model WatchKeyword {
   rawItems    RawItem[]
 
   @@index([enabled])
+}
+
+model KolAccount {
+  id          String   @id @default(cuid())
+  handle      String   @unique
+  displayName String?
+  tier        Int      @default(2)
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([enabled])
+  @@index([tier])
 }
 
 model HotTopic {

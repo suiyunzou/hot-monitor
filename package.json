@@ -10,6 +10,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:apply": "node scripts/apply-sqlite-migration.mjs",
+    "db:reset-content": "node scripts/reset-content.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"

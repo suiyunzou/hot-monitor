@@ -11,10 +11,16 @@ export type SourceConfig = {
   entryUrl?: string;
 };
 
+export type KolAccountRef = {
+  handle: string;
+  tier: number;
+};
+
 export type CollectOptions = {
   since?: Date;
   limit?: number;
   query?: string;
+  kolAccounts?: KolAccountRef[];
 };
 
 export type CollectedItem = {
@@ -31,6 +37,11 @@ export type CollectedItem = {
   content?: string;
   language?: string;
   publishedAt?: Date;
+  viewCount?: number;
+  likeCount?: number;
+  retweetCount?: number;
+  replyCount?: number;
+  engagementScore?: number;
   metadata?: Record<string, unknown>;
 };
 

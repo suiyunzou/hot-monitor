@@ -30,6 +30,10 @@ export async function GET(request: Request) {
                 excerpt: true,
                 publishedAt: true,
                 fetchedAt: true,
+                viewCount: true,
+                likeCount: true,
+                retweetCount: true,
+                replyCount: true,
                 source: {
                   select: {
                     name: true
@@ -70,7 +74,11 @@ export async function GET(request: Request) {
         credibilityLevel: source.rawItem.credibilityLevel,
         excerpt: source.rawItem.excerpt,
         publishedAt: source.rawItem.publishedAt,
-        fetchedAt: source.rawItem.fetchedAt
+        fetchedAt: source.rawItem.fetchedAt,
+        viewCount: source.rawItem.viewCount,
+        likeCount: source.rawItem.likeCount,
+        retweetCount: source.rawItem.retweetCount,
+        replyCount: source.rawItem.replyCount
       }))
     }))
   });

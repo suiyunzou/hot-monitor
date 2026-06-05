@@ -548,6 +548,228 @@ h1 {
   background: var(--signal);
 }
 
+.kol-box {
+  margin-top: 26px;
+}
+
+.kol-box__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.kol-box__head svg {
+  color: var(--accent);
+}
+
+.kol-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+}
+
+.kol-form input,
+.kol-form select,
+.kol-form button {
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  padding: 8px;
+  font-size: 13px;
+}
+
+.kol-form button {
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+  font-family: "Courier New", monospace;
+  font-weight: 700;
+}
+
+.kol-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.kol-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.kol-item__main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid rgba(23, 32, 26, 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(244, 239, 227, 0.48);
+  color: var(--muted);
+  padding: 7px 9px;
+  cursor: pointer;
+  text-align: left;
+  opacity: 0.66;
+  transition:
+    background 160ms ease,
+    opacity 160ms ease;
+}
+
+.kol-item.is-enabled .kol-item__main {
+  background: rgba(11, 143, 123, 0.14);
+  color: var(--ink);
+  border-color: var(--line);
+  opacity: 1;
+}
+
+.kol-item__main:disabled {
+  cursor: wait;
+}
+
+.kol-tier {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(47, 104, 168, 0.12);
+  color: var(--blue);
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.kol-tier--official {
+  background: rgba(196, 79, 53, 0.14);
+  color: var(--accent);
+}
+
+.kol-item__handle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.kol-item__main strong {
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  min-width: 28px;
+  text-align: right;
+}
+
+.kol-item__delete {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.kol-item__delete:hover:not(:disabled) {
+  background: rgba(196, 79, 53, 0.12);
+  color: var(--accent);
+}
+
+.kol-item__delete:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.email-box {
+  margin-top: 26px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.email-box__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.email-box__head svg {
+  color: var(--accent);
+}
+
+.email-box__dot {
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.email-box__dot.is-on {
+  background: var(--signal);
+  box-shadow: 0 0 0 3px rgba(11, 143, 123, 0.16);
+}
+
+.email-box__status {
+  margin: 12px 0 0;
+  font-size: 14px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.email-box__meta {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.email-box__send {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  justify-content: center;
+  margin-top: 12px;
+  border: 1px solid rgba(23, 32, 26, 0.86);
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 9px 12px;
+  font-family: "Courier New", monospace;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.email-box__send:hover:not(:disabled) {
+  background: var(--accent);
+  transform: translateY(-1px);
+}
+
+.email-box__send:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .topic-stack {
   display: grid;
   gap: 16px;
@@ -696,6 +918,36 @@ h2 {
   border-radius: 999px;
   padding: 5px 8px;
   background: rgba(244, 239, 227, 0.82);
+}
+
+.topic__cred {
+  color: var(--signal) !important;
+  font-weight: 700;
+}
+
+.topic__engagement {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.topic__engagement span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: rgba(47, 104, 168, 0.08);
+  color: var(--blue);
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.topic__engagement svg {
+  flex: 0 0 auto;
 }
 
 .source-tags {

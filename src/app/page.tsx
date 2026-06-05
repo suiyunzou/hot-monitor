@@ -1,57 +1,16 @@
 import { RadarDashboard } from "@/components/radar-dashboard";
-import type { HotTopicApiItem, RawNewsItem, WatchKeyword } from "@/components/radar-dashboard";
+import type { HotTopicApiItem, WatchKeyword } from "@/components/radar-dashboard";
 import { prisma } from "@/lib/db/prisma";
 
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const [rawItems, hotTopics, watchKeywords] = await Promise.all([
-    getInitialRawItems(),
+  const [hotTopics, watchKeywords] = await Promise.all([
     getInitialHotTopics(),
     getInitialWatchKeywords()
   ]);
 
-  return (
-    <RadarDashboard
-      initialHotTopics={hotTopics}
-      initialRawItems={rawItems}
-      initialWatchKeywords={watchKeywords}
-    />
-  );
-}
-
-async function getInitialRawItems(): Promise<RawNewsItem[]> {
-  const items = await prisma.rawItem.findMany({
-    orderBy: { fetchedAt: "desc" },
-    take: 40,
-    include: {
-      source: {
-        select: {
-          name: true,
-          type: true
-        }
-      },
-      watchKeyword: {
-        select: {
-          keyword: true
-        }
-      }
-    }
-  });
-
-  return items.slice(0, 40).map((item) => ({
-    id: item.id,
-    title: item.title,
-    url: item.url,
-    excerpt: item.excerpt ?? undefined,
-    content: item.content ?? undefined,
-    sourceName: item.source.name,
-    sourceType: item.source.type,
-    credibilityLevel: item.credibilityLevel,
-    watchKeyword: item.watchKeyword?.keyword ?? null,
-    fetchedAt: item.fetchedAt.toISOString(),
-    publishedAt: item.publishedAt?.toISOString()
-  }));
+  return <RadarDashboard initialHotTopics={hotTopics} initialWatchKeywords={watchKeywords} />;
 }
 
 async function getInitialHotTopics(): Promise<HotTopicApiItem[]> {
@@ -70,6 +29,10 @@ async function getInitialHotTopics(): Promise<HotTopicApiItem[]> {
                 excerpt: true,
                 publishedAt: true,
                 fetchedAt: true,
+                viewCount: true,
+                likeCount: true,
+                retweetCount: true,
+                replyCount: true,
                 source: {
                   select: {
                     name: true
@@ -100,7 +63,11 @@ async function getInitialHotTopics(): Promise<HotTopicApiItem[]> {
       credibilityLevel: source.rawItem.credibilityLevel,
       excerpt: source.rawItem.excerpt,
       publishedAt: source.rawItem.publishedAt?.toISOString(),
-      fetchedAt: source.rawItem.fetchedAt.toISOString()
+      fetchedAt: source.rawItem.fetchedAt.toISOString(),
+      viewCount: source.rawItem.viewCount,
+      likeCount: source.rawItem.likeCount,
+      retweetCount: source.rawItem.retweetCount,
+      replyCount: source.rawItem.replyCount
     }))
   }));
 }
