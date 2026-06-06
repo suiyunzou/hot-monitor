@@ -3,6 +3,9 @@ import { extractArticle, stripTracking } from "@/lib/extractors/article-extracto
 import { fetchText, sleep } from "@/lib/http/fetch-page";
 import { officialSources } from "./default-sources";
 import type { CollectedItem, CollectorResult, CollectOptions, SourceCollector } from "./types";
+import { makeLogger } from "@/lib/logger";
+
+const logger = makeLogger("collect:official");
 
 const AI_TERMS = [
   "ai",
@@ -27,19 +30,29 @@ export class OfficialCollector implements SourceCollector {
     const items: CollectedItem[] = [];
     const errors: string[] = [];
 
+    logger.info(`开始抓取 ${officialSources.length} 个官网来源，每源最多取 ${limit} 篇`);
+
     for (const source of officialSources) {
       if (!source.entryUrl) {
+        logger.warn(`${source.name} 没有配置入口 URL，跳过`);
         continue;
       }
 
       try {
+        logger.info(`抓取入口页：${source.name} → ${source.entryUrl}`);
         const entryHtml = await fetchText(source.entryUrl);
         const entryArticle = extractArticle(entryHtml, source.entryUrl);
-        const candidateLinks = entryArticle.links
+        const allLinks = entryArticle.links;
+        const candidateLinks = allLinks
           .filter((link) => isLikelyAiOrNewsLink(link.title, link.url))
           .slice(0, limit);
 
+        logger.info(
+          `${source.name} 入口页解析到 ${allLinks.length} 个链接，AI/新闻相关候选 ${candidateLinks.length} 个`
+        );
+
         if (candidateLinks.length === 0) {
+          logger.warn(`${source.name} 未找到候选文章链接，降级保存入口页内容`);
           items.push({
             sourceKey: source.key,
             sourceType: SourceType.OFFICIAL,
@@ -60,8 +73,11 @@ export class OfficialCollector implements SourceCollector {
         for (const link of candidateLinks) {
           try {
             await sleep(350);
+            logger.debug(`  抓取文章：${link.title || link.url}`);
             const articleHtml = await fetchText(link.url);
             const article = extractArticle(articleHtml, link.url);
+
+            logger.info(`  ✓ ${source.name}：${article.title || link.title}`);
 
             items.push({
               sourceKey: source.key,
@@ -81,18 +97,25 @@ export class OfficialCollector implements SourceCollector {
               }
             });
           } catch (error) {
-            errors.push(formatError(`official article ${link.url}`, error));
+            const msg = formatError(`official article ${link.url}`, error);
+            logger.error(`  文章抓取失败：${link.url} → ${error instanceof Error ? error.message : String(error)}`);
+            errors.push(msg);
           }
         }
       } catch (error) {
-        errors.push(formatError(`official source ${source.key}`, error));
+        const msg = formatError(`official source ${source.key}`, error);
+        logger.error(`${source.name} 入口页抓取失败：${error instanceof Error ? error.message : String(error)}`);
+        errors.push(msg);
       }
     }
 
+    const deduped = dedupeItems(items);
+    logger.info(`官网采集完成：共 ${items.length} 条，去重后 ${deduped.length} 条，错误 ${errors.length} 个`);
+
     return {
       collector: this.kind,
-      fetchedCount: items.length,
-      items: dedupeItems(items),
+      fetchedCount: deduped.length,
+      items: deduped,
       errors
     };
   }

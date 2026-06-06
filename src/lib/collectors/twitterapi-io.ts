@@ -12,6 +12,9 @@ import type {
   KolAccountRef,
   SourceCollector
 } from "./types";
+import { makeLogger } from "@/lib/logger";
+
+const logger = makeLogger("collect:twitter");
 
 type TwitterApiTweet = {
   id?: string;
@@ -45,6 +48,7 @@ export class TwitterApiIoCollector implements SourceCollector {
     const apiKey = process.env.TWITTERAPI_IO_KEY;
 
     if (!apiKey) {
+      logger.warn("TWITTERAPI_IO_KEY 未配置，跳过 X 采集");
       return {
         collector: this.kind,
         fetchedCount: 0,
@@ -54,14 +58,19 @@ export class TwitterApiIoCollector implements SourceCollector {
     }
 
     const kolTierByHandle = buildKolTierMap(options.kolAccounts);
+    const kolQueries = buildKolFromQueries(options.kolAccounts);
     const queries = options.query
       ? [options.query]
-      : [...twitterQueries, ...buildKolFromQueries(options.kolAccounts)];
+      : [...twitterQueries, ...kolQueries];
     const items: CollectedItem[] = [];
     const errors: string[] = [];
     const until = new Date();
     const since = options.since ?? new Date(until.getTime() - 2 * 60 * 60 * 1000);
     const perQueryLimit = options.limit ?? 20;
+
+    logger.info(
+      `X 采集开始：${queries.length} 条查询（含 ${kolQueries.length} 条 KOL from:查询），时间窗口 ${since.toISOString()} ~ ${until.toISOString()}`
+    );
 
     for (const query of queries) {
       try {
@@ -70,6 +79,8 @@ export class TwitterApiIoCollector implements SourceCollector {
         url.searchParams.set("queryType", "Latest");
         url.searchParams.set("since_time", Math.floor(since.getTime() / 1000).toString());
         url.searchParams.set("until_time", Math.floor(until.getTime() / 1000).toString());
+
+        logger.debug(`执行 X 查询：${query}`);
 
         const response = await fetch(url, {
           headers: {
@@ -82,9 +93,12 @@ export class TwitterApiIoCollector implements SourceCollector {
         }
 
         const json = (await response.json()) as Record<string, unknown>;
+        const rawTweets = getTweets(json);
         const scored: CollectedItem[] = [];
+        let droppedLowValue = 0;
+        let droppedNoId = 0;
 
-        for (const tweet of getTweets(json)) {
+        for (const tweet of rawTweets) {
           const id = tweet.id_str ?? tweet.id;
           const text = tweet.full_text ?? tweet.text;
           const username =
@@ -94,6 +108,7 @@ export class TwitterApiIoCollector implements SourceCollector {
             "unknown";
 
           if (!id || !text) {
+            droppedNoId += 1;
             continue;
           }
 
@@ -109,6 +124,10 @@ export class TwitterApiIoCollector implements SourceCollector {
           // Hard gate: drop low-value posts (e.g. a tweet with 5 views) unless
           // the author is an official / curated KOL / verified account.
           if (!isTweetWorthKeeping(metrics, authority)) {
+            logger.debug(
+              `  丢弃低价值推文 @${username}（权威=${authority} 浏览=${tweet.viewCount ?? "?"}  赞=${tweet.likeCount ?? "?"}）`
+            );
+            droppedLowValue += 1;
             continue;
           }
 
@@ -146,14 +165,30 @@ export class TwitterApiIoCollector implements SourceCollector {
 
         // Keep the most engaging posts per query rather than the first N.
         scored.sort((a, b) => (b.engagementScore ?? 0) - (a.engagementScore ?? 0));
-        items.push(...scored.slice(0, perQueryLimit));
+        const kept = scored.slice(0, perQueryLimit);
+        items.push(...kept);
+
+        logger.info(
+          `查询「${query.slice(0, 60)}」→ 原始 ${rawTweets.length} | 无效 ${droppedNoId} | 低价值丢弃 ${droppedLowValue} | 保留 ${kept.length}（评分前 ${perQueryLimit}）`
+        );
+
+        if (kept.length > 0) {
+          for (const item of kept.slice(0, 3)) {
+            logger.debug(
+              `  @${item.author} score=${item.engagementScore} 👁${item.viewCount ?? "?"} ♥${item.likeCount ?? "?"} ─ ${item.title?.slice(0, 60)}`
+            );
+          }
+        }
       } catch (error) {
+        logger.error(`X 查询失败「${query}」：${error instanceof Error ? error.message : String(error)}`);
         errors.push(formatError(`twitterapi.io query ${query}`, error));
       }
     }
 
     const deduped = dedupeTweets(items);
     deduped.sort((a, b) => (b.engagementScore ?? 0) - (a.engagementScore ?? 0));
+
+    logger.info(`X 采集完成：所有查询合计保留 ${items.length} 条，去重后 ${deduped.length} 条，错误 ${errors.length} 个`);
 
     return {
       collector: this.kind,
