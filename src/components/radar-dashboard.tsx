@@ -11,7 +11,6 @@ import {
   MessageCircle,
   Power,
   Radar,
-  RefreshCcw,
   Search,
   Send,
   ShieldAlert,
@@ -89,6 +88,70 @@ type CollectRunApiItem = {
   metadataJson?: string | null;
 };
 
+type CollectRunEventApiItem = {
+  id: string;
+  level: string;
+  phase: string;
+  eventType: string;
+  message: string;
+  details?: unknown;
+  createdAt: string;
+};
+
+type RunRawItemApiItem = {
+  id: string;
+  title: string;
+  url: string;
+  sourceName: string;
+  sourceType: string;
+  credibilityLevel: string;
+  status: string;
+  fetchedAt: string;
+  query?: string;
+  provider?: string;
+  keyword?: string;
+  snippetOnly: boolean;
+  extractionError?: string;
+  adoptedByAi: boolean;
+};
+
+type RunHotTopicApiItem = {
+  id: string;
+  title: string;
+  hotScore: number;
+  confidence: number;
+  status: string;
+  needsVerification: boolean;
+  sources: Array<{
+    id: string;
+    title: string;
+    url: string;
+    sourceType: string;
+    credibilityLevel: string;
+  }>;
+};
+
+type CollectRunDetails = {
+  run: CollectRunApiItem;
+  events: CollectRunEventApiItem[];
+  evidenceSummary: {
+    rawItemCount: number;
+    adoptedCount: number;
+    snippetOnlyCount: number;
+    providerCounts: Record<string, number>;
+    credibilityCounts: Record<string, number>;
+  };
+  rawItems: RunRawItemApiItem[];
+  aiAnalyses: Array<{
+    id: string;
+    task: string;
+    model: string;
+    topicId?: string | null;
+    createdAt: string;
+  }>;
+  hotTopics: RunHotTopicApiItem[];
+};
+
 type AnalyzeApiResponse = {
   analysisConfigured: boolean;
   model: string;
@@ -154,6 +217,8 @@ const statusIcon: Record<TopicStatus, ReactNode> = {
   verify: <ShieldAlert size={16} />
 };
 
+const AUTO_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+
 export function RadarDashboard({
   initialHotTopics = [],
   initialWatchKeywords = []
@@ -166,7 +231,7 @@ export function RadarDashboard({
   const [watchKeywords, setWatchKeywords] = useState<WatchKeyword[]>(initialWatchKeywords);
   const [keywordsLoaded, setKeywordsLoaded] = useState(initialWatchKeywords.length > 0);
   const [keywordInput, setKeywordInput] = useState("");
-  const [scanStatus, setScanStatus] = useState("等待自动抓取");
+  const [runDetails, setRunDetails] = useState<CollectRunDetails | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState("等待自动分析");
   const [analysisModel, setAnalysisModel] = useState("deepseek/deepseek-v4-flash");
   const [pendingRawItems, setPendingRawItems] = useState(0);
@@ -185,10 +250,12 @@ export function RadarDashboard({
   const [pendingKolIds, setPendingKolIds] = useState<string[]>([]);
   const [pendingKeywordIds, setPendingKeywordIds] = useState<string[]>([]);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date>(() => new Date());
-  const [nextRefreshAt, setNextRefreshAt] = useState<Date>(() => addMinutes(new Date(), 60));
+  const [nextRefreshAt, setNextRefreshAt] = useState<Date>(() => getNextScheduledRefresh(new Date()));
   const [clockNow, setClockNow] = useState<Date>(() => new Date());
   const [mounted, setMounted] = useState(false);
   const lastAutoAnalyzeAt = useRef(0);
+  const isScanningRef = useRef(isScanning);
+  const watchKeywordsRef = useRef(watchKeywords);
 
   const dateQuery = useMemo(() => buildDateQuery(datePreset), [datePreset]);
   const refreshSummary = useMemo(
@@ -212,30 +279,42 @@ export function RadarDashboard({
   useEffect(() => {
     document.documentElement.dataset.hotMonitorHydrated = "true";
     setMounted(true);
+    setNextRefreshAt(getNextScheduledRefresh(new Date()));
     void refreshDashboard();
     void loadWatchKeywords();
     void loadCollectStatus();
     void loadEmailStatus();
     void loadKolAccounts();
 
-    const initialTimer = window.setTimeout(() => {
+    let intervalTimer: number | undefined;
+    const refreshTimer = window.setTimeout(() => {
       void triggerScan({ automatic: true });
-    }, 1200);
-    const hourlyTimer = window.setInterval(() => {
-      void triggerScan({ automatic: true });
-    }, 60 * 60 * 1000);
+      intervalTimer = window.setInterval(() => {
+        void triggerScan({ automatic: true });
+      }, AUTO_REFRESH_INTERVAL_MS);
+    }, getNextScheduledRefresh(new Date()).getTime() - Date.now());
     const clockTimer = window.setInterval(() => {
       setClockNow(new Date());
     }, 60 * 1000);
 
     return () => {
-      window.clearTimeout(initialTimer);
-      window.clearInterval(hourlyTimer);
+      window.clearTimeout(refreshTimer);
+      if (intervalTimer !== undefined) {
+        window.clearInterval(intervalTimer);
+      }
       window.clearInterval(clockTimer);
     };
     // Initial timers should be installed once; date changes are handled below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    isScanningRef.current = isScanning;
+  }, [isScanning]);
+
+  useEffect(() => {
+    watchKeywordsRef.current = watchKeywords;
+  }, [watchKeywords]);
 
   useEffect(() => {
     void refreshDashboard();
@@ -458,22 +537,23 @@ export function RadarDashboard({
       return;
     }
 
-    const data = (await response.json()) as { latestRuns: CollectRunApiItem[] };
+    const data = (await response.json()) as { latestRuns: CollectRunApiItem[]; runDetails?: CollectRunDetails | null };
     const latestRun = data.latestRuns[0];
+    setRunDetails(data.runDetails ?? null);
     if (!latestRun) {
-      setScanStatus("等待自动抓取");
       setIsScanning(false);
+      isScanningRef.current = false;
       return;
     }
 
-    setScanStatus(formatCollectRunStatus(latestRun));
-
     if (latestRun.status === "RUNNING") {
       setIsScanning(true);
+      isScanningRef.current = true;
       return;
     }
 
     setIsScanning(false);
+    isScanningRef.current = false;
     await refreshDashboard();
   }
 
@@ -517,22 +597,24 @@ export function RadarDashboard({
       setWatchKeywords((current) =>
         current.map((item) => (item.id === keyword.id ? { ...item, enabled: keyword.enabled } : item))
       );
-      setScanStatus(error instanceof Error ? error.message : "关注词开关保存失败");
     } finally {
       setPendingKeywordIds((current) => current.filter((id) => id !== keyword.id));
     }
   }
 
   async function triggerScan(options: { automatic?: boolean } = {}) {
-    if (isScanning) {
+    if (isScanningRef.current) {
+      if (options.automatic) {
+        setNextRefreshAt(getNextScheduledRefresh(new Date()));
+      }
       return;
     }
 
+    isScanningRef.current = true;
     setIsScanning(true);
     setScanPulse((value) => value + 1);
-    setScanStatus(options.automatic ? "自动抓取中" : "手动抓取中");
     if (options.automatic) {
-      setNextRefreshAt(addMinutes(new Date(), 60));
+      setNextRefreshAt(getNextScheduledRefresh(new Date()));
     }
     let keepPolling = false;
 
@@ -542,7 +624,7 @@ export function RadarDashboard({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           collectors: ["search"],
-          keywordOnly: watchKeywords.some((keyword) => keyword.enabled),
+          keywordOnly: watchKeywordsRef.current.some((keyword) => keyword.enabled),
           limit: 5,
           background: true,
           autoAnalyze: true
@@ -559,15 +641,13 @@ export function RadarDashboard({
       }
 
       keepPolling = true;
-      setNextRefreshAt(addMinutes(new Date(), 60));
-      setScanStatus("后台抓取中");
       window.setTimeout(() => {
         void loadCollectStatus();
       }, 900);
-    } catch (error) {
-      setScanStatus(error instanceof Error ? error.message : "采集失败");
+    } catch {
     } finally {
       if (!keepPolling) {
+        isScanningRef.current = false;
         setIsScanning(false);
       }
     }
@@ -636,18 +716,12 @@ export function RadarDashboard({
             <Radar className="radar-mark__icon" size={20} />
           </div>
           <div className="topbar__heading">
-            <p className="eyebrow">AI HOT MONITOR / 1H AUTO CYCLE</p>
+            <p className="eyebrow">AI HOT MONITOR / 30M AUTO CYCLE</p>
             <h1>AI 情报雷达</h1>
           </div>
         </div>
 
         <div className="topbar__status" aria-label="system status">
-          <StatusPill
-            icon={<RefreshCcw size={14} />}
-            label="采集"
-            value={scanStatus}
-            tone={isScanning ? "running" : "idle"}
-          />
           <StatusPill
             icon={<Sparkles size={14} />}
             label="AI 分析"
@@ -667,7 +741,7 @@ export function RadarDashboard({
             onClick={() => void triggerScan()}
           >
             <Zap size={18} />
-            {isScanning ? "抓取中" : "立即抓取"}
+            {isScanning ? "更新中" : "立即更新"}
           </button>
         </div>
       </header>
@@ -865,7 +939,7 @@ export function RadarDashboard({
               ) : (
                 <>
                   <strong>当前筛选范围暂无新闻</strong>
-                  <span>可放宽日期范围，或等待下一次自动抓取。</span>
+                  <span>可放宽日期范围，或等待下一次自动更新。</span>
                 </>
               )}
             </div>
@@ -989,6 +1063,7 @@ export function RadarDashboard({
               </div>
             </div>
           ) : null}
+          <DataFlowPanel details={runDetails} />
           <ol>
             <li>新闻日期优先使用原文发布日期，没有发布日期时使用抓取时间。</li>
             <li>AI 分析在采集后自动执行，不需要用户悬浮或点击。</li>
@@ -1064,8 +1139,17 @@ function buildDateQuery(preset: DatePreset) {
   return query ? `?${query}` : "";
 }
 
-function addMinutes(date: Date, minutes: number) {
-  return new Date(date.getTime() + minutes * 60 * 1000);
+function getNextScheduledRefresh(date: Date) {
+  const next = new Date(date);
+  next.setSeconds(0, 0);
+
+  if (next.getMinutes() < 30) {
+    next.setMinutes(30);
+    return next;
+  }
+
+  next.setHours(next.getHours() + 1, 0, 0, 0);
+  return next;
 }
 
 function formatRefreshSummary(lastUpdatedAt: Date, nextRefreshAt: Date, now: Date) {
@@ -1089,10 +1173,10 @@ function formatRefreshIn(diffMs: number) {
   const minutes = Math.max(0, Math.round(diffMs / 60_000));
 
   if (minutes <= 0) {
-    return "即将刷新";
+    return "即将更新";
   }
 
-  return `将于 ${minutes} 分钟后刷新`;
+  return `将于 ${minutes} 分钟后更新`;
 }
 
 function toDateInputValue(date: Date) {
@@ -1243,4 +1327,112 @@ function SourceMeter({ label, value, note }: { label: string; value: number; not
       <small>{note}</small>
     </div>
   );
+}
+
+function DataFlowPanel({ details }: { details: CollectRunDetails | null }) {
+  if (!details) {
+    return (
+      <section className="data-flow">
+        <div className="data-flow__head">
+          <span>数据流转</span>
+          <strong>暂无运行记录</strong>
+        </div>
+        <p className="data-flow__empty">启动一次采集后，这里会展示搜索、证据、AI 分析和热点产出的链路。</p>
+      </section>
+    );
+  }
+
+  const visibleEvents = details.events.filter((event) => event.level !== "DEBUG").slice(-8).reverse();
+  const queryLabels = Array.from(
+    new Set(details.rawItems.map((item) => item.query || item.keyword).filter((value): value is string => Boolean(value)))
+  ).slice(0, 4);
+  const providerText = formatCountMap(details.evidenceSummary.providerCounts);
+  const credibilityText = formatCountMap(details.evidenceSummary.credibilityCounts, formatCredibilityLevel);
+
+  return (
+    <section className="data-flow">
+      <div className="data-flow__head">
+        <span>数据流转</span>
+        <strong>{formatCollectRunStatus(details.run)}</strong>
+      </div>
+
+      <div className="data-flow__metrics">
+        <span>证据 {details.evidenceSummary.rawItemCount}</span>
+        <span>AI采用 {details.evidenceSummary.adoptedCount}</span>
+        <span>摘要降级 {details.evidenceSummary.snippetOnlyCount}</span>
+        <span>热点 {details.hotTopics.length}</span>
+      </div>
+
+      <div className="data-flow__block">
+        <small>搜索路径</small>
+        <p>{queryLabels.length > 0 ? queryLabels.join(" / ") : "本轮暂无可展示查询"}</p>
+        <em>{providerText || "暂无 provider 统计"}</em>
+      </div>
+
+      <div className="data-flow__block">
+        <small>证据质量</small>
+        <p>{credibilityText || "暂无可信度统计"}</p>
+        <div className="data-flow__evidence">
+          {details.rawItems.slice(0, 5).map((item) => (
+            <a href={item.url} key={item.id} rel="noreferrer" target="_blank" title={item.title}>
+              <span>{item.adoptedByAi ? "已采用" : item.status === "NEW" ? "待分析" : "未采用"}</span>
+              <strong>{trimText(item.title, 48)}</strong>
+              <em>{formatCredibilityLevel(item.credibilityLevel)} · {item.provider || formatSourceType(item.sourceType)}</em>
+            </a>
+          ))}
+        </div>
+      </div>
+
+      <div className="data-flow__block">
+        <small>AI 产出</small>
+        {details.hotTopics.length === 0 ? (
+          <p>本轮尚未生成热点，AI 分析记录 {details.aiAnalyses.length} 条。</p>
+        ) : (
+          <div className="data-flow__topics">
+            {details.hotTopics.slice(0, 4).map((topic) => (
+              <div key={topic.id}>
+                <strong>{trimText(topic.title, 50)}</strong>
+                <span>热度 {topic.hotScore} · 可信 {topic.confidence}% · 来源 {topic.sources.length}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="data-flow__block">
+        <small>关键事件</small>
+        <div className="data-flow__events">
+          {visibleEvents.length === 0 ? (
+            <p>暂无关键事件</p>
+          ) : (
+            visibleEvents.map((event) => (
+              <div className={`data-flow__event data-flow__event--${event.level.toLowerCase()}`} key={event.id}>
+                <span>{event.level}</span>
+                <p>{event.message}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function formatCountMap(counts: Record<string, number>, formatKey: (key: string) => string = (key) => key) {
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => `${formatKey(key)} ${count}`)
+    .join(" / ");
+}
+
+function formatCredibilityLevel(value: string) {
+  const map: Record<string, string> = {
+    OFFICIAL: "官方",
+    PRIMARY: "一手",
+    MEDIA: "媒体",
+    SOCIAL_VERIFIED: "认证社交",
+    SOCIAL: "社交",
+    SEARCH_SNIPPET: "搜索摘要"
+  };
+  return map[value] ?? value;
 }

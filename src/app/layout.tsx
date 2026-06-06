@@ -70,7 +70,7 @@ export default function RootLayout({
           const scanButton = document.querySelector("[data-hot-monitor-scan]");
           if (scanButton) {
             scanButton.disabled = false;
-            scanButton.lastChild.textContent = "同步采集";
+            scanButton.lastChild.textContent = "立即更新";
           }
         }
       } catch {
@@ -88,8 +88,8 @@ export default function RootLayout({
       event.preventDefault();
       event.stopPropagation();
       scanButton.disabled = true;
-      if (scanButton.lastChild) scanButton.lastChild.textContent = "采集中";
-      setStatus("后台采集中");
+      if (scanButton.lastChild) scanButton.lastChild.textContent = "更新中";
+      setStatus("后台更新中");
       try {
         const response = await fetch("/api/collect", {
           method: "POST",
@@ -101,7 +101,7 @@ export default function RootLayout({
         pollCollectStatus();
       } catch {
         scanButton.disabled = false;
-        if (scanButton.lastChild) scanButton.lastChild.textContent = "同步采集";
+        if (scanButton.lastChild) scanButton.lastChild.textContent = "立即更新";
         setStatus("采集失败");
       }
       return;
