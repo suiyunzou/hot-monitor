@@ -24,6 +24,7 @@ export async function GET(request: Request) {
           include: {
             rawItem: {
               select: {
+                id: true,
                 title: true,
                 url: true,
                 sourceType: true,
@@ -172,17 +173,31 @@ function buildTopicSearchWhere(term: string): Prisma.HotTopicWhereInput {
   };
 }
 
-/** Collapse near-identical AI topics (same normalized title) to the highest-scored one. */
-function dedupeTopics<T extends { title: string; hotScore: number }>(topics: T[]): T[] {
-  const byTitle = new Map<string, T>();
+/** Collapse duplicate topics (same title or shared rawItem) — keep first/highest-scored. */
+function dedupeTopics<
+  T extends { title: string; hotScore: number; sources: Array<{ rawItem: { id: string } }> }
+>(topics: T[]): T[] {
+  const result: T[] = [];
+  const seenTitles = new Set<string>();
+  const seenRawItemIds = new Set<string>();
+
   for (const topic of topics) {
-    const key = topic.title.replace(/\s+/g, "").toLowerCase();
-    const existing = byTitle.get(key);
-    if (!existing || topic.hotScore > existing.hotScore) {
-      byTitle.set(key, topic);
+    const titleKey = topic.title.replace(/\s+/g, "").toLowerCase();
+    const rawItemIds = topic.sources.map((source) => source.rawItem.id);
+
+    if (seenTitles.has(titleKey)) {
+      continue;
     }
+    if (rawItemIds.some((rawItemId) => seenRawItemIds.has(rawItemId))) {
+      continue;
+    }
+
+    seenTitles.add(titleKey);
+    rawItemIds.forEach((rawItemId) => seenRawItemIds.add(rawItemId));
+    result.push(topic);
   }
-  return Array.from(byTitle.values());
+
+  return result;
 }
 
 function buildTopicNewsDateWhere(searchParams: URLSearchParams): Prisma.HotTopicWhereInput | undefined {

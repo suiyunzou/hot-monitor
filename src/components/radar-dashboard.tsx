@@ -43,6 +43,8 @@ type Topic = {
   sourceTypes: string[];
   sources: TopicSource[];
   engagement?: TopicEngagement | null;
+  totalViews: number;
+  totalReplies: number;
   dateLabel: string;
   dateValue: string;
 };

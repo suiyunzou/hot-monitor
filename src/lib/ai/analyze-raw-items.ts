@@ -17,8 +17,12 @@ type RawItemForLineage = {
   credibilityLevel: string;
   title: string;
   url: string;
+  externalId: string | null;
+  canonicalUrl: string | null;
   metadataJson: string | null;
 };
+
+const RECENT_TOPIC_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function analyzeRawItems(limit = 5, options: AnalyzeRawItemsOptions = {}) {
   const rawItems = await prisma.rawItem.findMany({
@@ -127,9 +131,12 @@ export async function analyzeRawItems(limit = 5, options: AnalyzeRawItemsOptions
 
   const rawItemById = new Map(rawItems.map((item) => [item.id, item]));
   const validSourceIds = new Set(rawItemById.keys());
+  const usedRawItemIds = new Set<string>();
+  const recentTopicCutoff = new Date(Date.now() - RECENT_TOPIC_WINDOW_MS);
   let topicCount = 0;
   let ignoredCount = 0;
   let skippedNoSourceCount = 0;
+  let skippedDuplicateCount = 0;
 
   for (const analysis of openRouterResult.result.analyses) {
     const sourceIds = analysis.source_ids.filter((sourceId) => validSourceIds.has(sourceId));
@@ -146,6 +153,24 @@ export async function analyzeRawItems(limit = 5, options: AnalyzeRawItemsOptions
         });
       }
       skippedNoSourceCount += 1;
+      continue;
+    }
+
+    const batchOverlap = sourceIds.filter((sourceId) => usedRawItemIds.has(sourceId));
+    if (batchOverlap.length > 0) {
+      logger.warn(
+        `批次内 source_id 重复，跳过：${analysis.topic || "无标题"} overlapping=${batchOverlap.join(",")}`
+      );
+      if (options.collectRunId) {
+        await logger.runWarn({
+          runId: options.collectRunId,
+          phase: "ai",
+          eventType: "ai_duplicate_skip",
+          message: `批次内 source_id 重复，跳过：${analysis.topic || "无标题"}`,
+          details: { sourceIds, batchOverlap, analysis }
+        });
+      }
+      skippedDuplicateCount += 1;
       continue;
     }
 
@@ -176,7 +201,31 @@ export async function analyzeRawItems(limit = 5, options: AnalyzeRawItemsOptions
         where: { id: { in: sourceIds } },
         data: { status: RawItemStatus.IGNORED }
       });
+      sourceIds.forEach((sourceId) => usedRawItemIds.add(sourceId));
       ignoredCount += 1;
+      continue;
+    }
+
+    const existingTopicId = await findExistingTopicForSources(sourceIds, rawItemById, recentTopicCutoff);
+    if (existingTopicId) {
+      logger.warn(
+        `近7天已有热点占用相同来源，跳过：${analysis.topic || "无标题"} existingTopicId=${existingTopicId}`
+      );
+      if (options.collectRunId) {
+        await logger.runWarn({
+          runId: options.collectRunId,
+          phase: "ai",
+          eventType: "ai_existing_topic_skip",
+          message: `近7天已有热点占用相同来源，跳过：${analysis.topic || "无标题"}`,
+          details: { sourceIds, existingTopicId, analysis }
+        });
+      }
+      await prisma.rawItem.updateMany({
+        where: { id: { in: sourceIds } },
+        data: { status: RawItemStatus.ANALYZED }
+      });
+      sourceIds.forEach((sourceId) => usedRawItemIds.add(sourceId));
+      skippedDuplicateCount += 1;
       continue;
     }
 
@@ -271,6 +320,8 @@ export async function analyzeRawItems(limit = 5, options: AnalyzeRawItemsOptions
       }
       topicCount += 1;
     }
+
+    sourceIds.forEach((sourceId) => usedRawItemIds.add(sourceId));
   }
 
   if (options.collectRunId) {
@@ -279,13 +330,19 @@ export async function analyzeRawItems(limit = 5, options: AnalyzeRawItemsOptions
       runId: options.collectRunId,
       phase: "ai",
       eventType: "ai_complete",
-      message: `结果汇总：分析线索 ${rawItems.length} 条 | 创建热点 ${topicCount} 个 | 忽略非AI ${ignoredCount} 条 | source_ids无效跳过 ${skippedNoSourceCount} 条`,
-      details: { analyzedCount: rawItems.length, topicCount, ignoredCount, skippedNoSourceCount }
+      message: `结果汇总：分析线索 ${rawItems.length} 条 | 创建热点 ${topicCount} 个 | 忽略非AI ${ignoredCount} 条 | source_ids无效跳过 ${skippedNoSourceCount} 条 | 重复跳过 ${skippedDuplicateCount} 条`,
+      details: {
+        analyzedCount: rawItems.length,
+        topicCount,
+        ignoredCount,
+        skippedNoSourceCount,
+        skippedDuplicateCount
+      }
     });
   } else {
     logger.section("AI 分析完成");
     logger.info(
-      `结果汇总：分析线索 ${rawItems.length} 条 | 创建热点 ${topicCount} 个 | 忽略非AI ${ignoredCount} 条 | source_ids无效跳过 ${skippedNoSourceCount} 条`
+      `结果汇总：分析线索 ${rawItems.length} 条 | 创建热点 ${topicCount} 个 | 忽略非AI ${ignoredCount} 条 | source_ids无效跳过 ${skippedNoSourceCount} 条 | 重复跳过 ${skippedDuplicateCount} 条`
     );
   }
 
@@ -306,8 +363,61 @@ function summarizeRawItems<T extends RawItemForLineage>(sourceIds: string[], raw
       credibilityLevel: item.credibilityLevel,
       title: item.title,
       url: item.url,
+      externalId: item.externalId,
       metadata: parseJson(item.metadataJson)
     }));
+}
+
+async function findExistingTopicForSources<T extends RawItemForLineage>(
+  sourceIds: string[],
+  rawItemById: Map<string, T>,
+  cutoff: Date
+): Promise<string | null> {
+  const byRawItemId = await prisma.topicSource.findFirst({
+    where: {
+      rawItemId: { in: sourceIds },
+      topic: { createdAt: { gte: cutoff } }
+    },
+    select: { topicId: true }
+  });
+  if (byRawItemId) {
+    return byRawItemId.topicId;
+  }
+
+  const tweetIds = sourceIds
+    .map((sourceId) => rawItemById.get(sourceId))
+    .filter((item): item is T => Boolean(item))
+    .filter((item) => item.sourceType === "TWITTER")
+    .map((item) => extractTweetId(item))
+    .filter((id): id is string => Boolean(id));
+
+  if (tweetIds.length === 0) {
+    return null;
+  }
+
+  const byTweetId = await prisma.topicSource.findFirst({
+    where: {
+      rawItem: {
+        sourceType: "TWITTER",
+        OR: [
+          { externalId: { in: tweetIds } },
+          ...tweetIds.map((tweetId) => ({ url: { contains: `/status/${tweetId}` } }))
+        ]
+      },
+      topic: { createdAt: { gte: cutoff } }
+    },
+    select: { topicId: true }
+  });
+
+  return byTweetId?.topicId ?? null;
+}
+
+function extractTweetId(item: Pick<RawItemForLineage, "url" | "externalId">): string | null {
+  if (item.externalId) {
+    return item.externalId;
+  }
+  const match = item.url.match(/\/status\/(\d+)/);
+  return match?.[1] ?? null;
 }
 
 function parseJson(value: string | null) {

@@ -27,12 +27,13 @@ export function buildAnalyzeMessages(items: AnalyzeInputItem[]) {
       content: JSON.stringify(
         {
           task:
-            "For each source item, decide whether it is relevant to AI news. Produce structured analyses. source_ids must contain only ids from the input. If an item is not AI-related, set is_ai_related=false and keep a short reason in summary.",
+            "For each source item, decide whether it is relevant to AI news. Produce structured analyses. source_ids must contain only ids from the input. Each source id may appear in at most one analysis; merge the same event into a single analysis. If an item is not AI-related, set is_ai_related=false and keep a short reason in summary.",
           reliability_rules: [
             "Official sources are stronger than social/search snippets.",
             "Social-only signals need verification.",
             "Search results require landing page evidence.",
-            "No source id means no valid hot topic."
+            "No source id means no valid hot topic.",
+            "Never reuse a source id across multiple analyses."
           ],
           scoring_rules: [
             "hot_score reflects attention-worthiness: reach (view_count), engagement (like/reply/retweet counts) and recency. A higher engagement_score means more reach and engagement.",
