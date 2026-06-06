@@ -20,6 +20,7 @@ export type CollectOptions = {
   since?: Date;
   limit?: number;
   query?: string;
+  runId?: string;
   kolAccounts?: KolAccountRef[];
 };
 

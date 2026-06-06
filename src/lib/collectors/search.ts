@@ -4,6 +4,9 @@ import { extractArticle, normalizeWhitespace, stripTracking } from "@/lib/extrac
 import { absoluteUrl, fetchText, sleep } from "@/lib/http/fetch-page";
 import { aiSearchQueries } from "./default-sources";
 import type { CollectedItem, CollectorResult, CollectOptions, SourceCollector } from "./types";
+import { makeLogger } from "@/lib/logger";
+
+const logger = makeLogger("collect:search");
 
 const RELEVANT_PATTERNS = [
   /\bai\b/i,
@@ -40,27 +43,114 @@ export class SearchCollector implements SourceCollector {
     const items: CollectedItem[] = [];
     const errors: string[] = [];
 
+    logger.info(`开始搜索采集，共 ${queries.length} 条查询`);
+    if (options.runId) {
+      await logger.runInfo({
+        runId: options.runId,
+        phase: "search",
+        eventType: "collector_start",
+        message: `搜索采集开始，共 ${queries.length} 条查询`,
+        details: { queries }
+      });
+    }
+
     for (const query of queries) {
+      let bingCount = 0;
+      let googleCount = 0;
+
       try {
-        hits.push(...(await searchBing(query)));
+        const bingHits = await searchBing(query);
+        bingCount = bingHits.length;
+        hits.push(...bingHits);
       } catch (error) {
+        logger.error(`Bing 搜索失败「${query}」：${error instanceof Error ? error.message : String(error)}`);
+        if (options.runId) {
+          await logger.runWarn({
+            runId: options.runId,
+            phase: "search",
+            eventType: "provider_failed",
+            message: `Bing 搜索失败：${query}`,
+            details: { provider: "bing", query, error: error instanceof Error ? error.message : String(error) }
+          });
+        }
         errors.push(formatError(`bing search ${query}`, error));
       }
 
       try {
-        hits.push(...(await searchGoogle(query)));
+        const googleHits = await searchGoogle(query);
+        googleCount = googleHits.length;
+        hits.push(...googleHits);
       } catch (error) {
+        logger.error(`Google 搜索失败「${query}」：${error instanceof Error ? error.message : String(error)}`);
+        if (options.runId) {
+          await logger.runWarn({
+            runId: options.runId,
+            phase: "search",
+            eventType: "provider_failed",
+            message: `Google 搜索失败：${query}`,
+            details: { provider: "google", query, error: error instanceof Error ? error.message : String(error) }
+          });
+        }
         errors.push(formatError(`google search ${query}`, error));
       }
 
+      logger.info(`查询「${query}」→ Bing ${bingCount} 条 / Google ${googleCount} 条`);
+      if (options.runId) {
+        await logger.runInfo({
+          runId: options.runId,
+          phase: "search",
+          eventType: "query_result",
+          message: `查询完成：${query}`,
+          details: { query, providers: { bing: bingCount, google: googleCount } }
+        });
+      }
       await sleep(500);
     }
 
-    for (const hit of dedupeHits(hits).slice(0, options.limit ?? 12)) {
+    const deduped = dedupeHits(hits);
+    const takeCount = options.limit ?? 12;
+    logger.info(`搜索命中合计 ${hits.length} 条，去重后 ${deduped.length} 条，取前 ${takeCount} 条抓落地页`);
+    if (options.runId) {
+      await logger.runInfo({
+        runId: options.runId,
+        phase: "search",
+        eventType: "dedupe_result",
+        message: `搜索结果去重完成：${hits.length} → ${deduped.length}`,
+        details: { hitCount: hits.length, dedupedCount: deduped.length, takeCount }
+      });
+    }
+
+    for (const hit of deduped.slice(0, takeCount)) {
       try {
         await sleep(350);
+        logger.debug(`抓取落地页 [${hit.provider}]：${hit.url}`);
+        if (options.runId) {
+          await logger.runDebug({
+            runId: options.runId,
+            phase: "evidence",
+            eventType: "landing_fetch_start",
+            message: `抓取落地页：${hit.title}`,
+            details: { provider: hit.provider, query: hit.query, url: hit.url }
+          });
+        }
         const html = await fetchText(hit.url);
         const article = extractArticle(html, hit.url);
+
+        logger.info(`落地页成功 [${hit.provider}]：${article.title || hit.title}`);
+        if (options.runId) {
+          await logger.runInfo({
+            runId: options.runId,
+            phase: "evidence",
+            eventType: "landing_fetch_success",
+            message: `落地页抓取成功：${article.title || hit.title}`,
+            details: {
+              provider: hit.provider,
+              query: hit.query,
+              url: hit.url,
+              credibilityLevel: CredibilityLevel.MEDIA
+            }
+          });
+        }
 
         items.push({
           sourceKey: "web-search",
@@ -83,8 +173,34 @@ export class SearchCollector implements SourceCollector {
           }
         });
       } catch (error) {
+        logger.warn(`落地页抓取失败（丢弃）：${hit.url} → ${error instanceof Error ? error.message : String(error)}`);
+        if (options.runId) {
+          await logger.runWarn({
+            runId: options.runId,
+            phase: "evidence",
+            eventType: "landing_fetch_dropped",
+            message: `落地页抓取失败并丢弃：${hit.title}`,
+            details: {
+              provider: hit.provider,
+              query: hit.query,
+              url: hit.url,
+              error: error instanceof Error ? error.message : String(error)
+            }
+          });
+        }
         errors.push(formatError(`search landing page ${hit.url}`, error));
       }
+    }
+
+    logger.info(`搜索采集完成：成功入队 ${items.length} 条，错误 ${errors.length} 个`);
+    if (options.runId) {
+      await logger.runInfo({
+        runId: options.runId,
+        phase: "search",
+        eventType: "collector_complete",
+        message: `搜索采集完成：入队 ${items.length} 条，错误 ${errors.length} 个`,
+        details: { itemCount: items.length, errorCount: errors.length }
+      });
     }
 
     return {
@@ -96,22 +212,62 @@ export class SearchCollector implements SourceCollector {
   }
 }
 
-export async function collectSearchQuery(query: string, options: { watchKeywordId?: string; limit?: number } = {}) {
+export async function collectSearchQuery(query: string, options: { watchKeywordId?: string; limit?: number; runId?: string } = {}) {
   const hits: SearchHit[] = [];
+  let bingCount = 0;
+  let googleCount = 0;
 
   try {
-    hits.push(...(await searchBing(query, options)));
-  } catch {
-    // Individual keyword searches should not block the whole collect run.
+    const bingHits = await searchBing(query, options);
+    bingCount = bingHits.length;
+    hits.push(...bingHits);
+  } catch (error) {
+    logger.warn(`Bing 搜索失败「${query}」：${error instanceof Error ? error.message : String(error)}`);
+    if (options.runId) {
+      await logger.runWarn({
+        runId: options.runId,
+        phase: "search",
+        eventType: "provider_failed",
+        message: `Bing 搜索失败：${query}`,
+        details: { provider: "bing", query, error: error instanceof Error ? error.message : String(error) }
+      });
+    }
   }
 
   try {
-    hits.push(...(await searchGoogle(query, options)));
-  } catch {
-    // Individual keyword searches should not block the whole collect run.
+    const googleHits = await searchGoogle(query, options);
+    googleCount = googleHits.length;
+    hits.push(...googleHits);
+  } catch (error) {
+    logger.warn(`Google 搜索失败「${query}」：${error instanceof Error ? error.message : String(error)}`);
+    if (options.runId) {
+      await logger.runWarn({
+        runId: options.runId,
+        phase: "search",
+        eventType: "provider_failed",
+        message: `Google 搜索失败：${query}`,
+        details: { provider: "google", query, error: error instanceof Error ? error.message : String(error) }
+      });
+    }
   }
 
-  return dedupeHits(hits).slice(0, options.limit ?? 10);
+  const result = dedupeHits(hits).slice(0, options.limit ?? 10);
+  logger.debug(`关键词查询「${query}」→ Bing ${bingCount} / Google ${googleCount} → 去重后 ${result.length} 条`);
+  if (options.runId) {
+    await logger.runInfo({
+      runId: options.runId,
+      phase: "search",
+      eventType: "query_result",
+      message: `关键词查询完成：${query}`,
+      details: {
+        query,
+        providers: { bing: bingCount, google: googleCount },
+        dedupedCount: result.length,
+        watchKeywordId: options.watchKeywordId
+      }
+    });
+  }
+  return result;
 }
 
 async function searchBing(query: string, options: { watchKeywordId?: string } = {}): Promise<SearchHit[]> {

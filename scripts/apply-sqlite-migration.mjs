@@ -54,6 +54,9 @@ function applyIncrementalMigrations(database) {
 
   // 202606050001 engagement metrics + translation fields + KolAccount
   applyEngagementKolMigration(database, rawItemColumns, tableNames, indexNames);
+
+  // 202606050002 collect run event timeline + lineage
+  applyCollectRunLineageMigration(database, rawItemColumns, tableNames, indexNames);
 }
 
 function applyEngagementKolMigration(database, rawItemColumns, tableNames, indexNames) {
@@ -90,5 +93,52 @@ function applyEngagementKolMigration(database, rawItemColumns, tableNames, index
     database.exec('CREATE UNIQUE INDEX "KolAccount_handle_key" ON "KolAccount"("handle");');
     database.exec('CREATE INDEX "KolAccount_enabled_idx" ON "KolAccount"("enabled");');
     database.exec('CREATE INDEX "KolAccount_tier_idx" ON "KolAccount"("tier");');
+  }
+}
+
+function applyCollectRunLineageMigration(database, rawItemColumns, tableNames, indexNames) {
+  const addColumnIfMissing = (tableName, columnName) => {
+    const columns = database.prepare(`PRAGMA table_info('${tableName}')`).all().map((row) => row.name);
+    if (!columns.includes(columnName)) {
+      database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${columnName}" TEXT;`);
+    }
+  };
+
+  addColumnIfMissing("RawItem", "collectRunId");
+  addColumnIfMissing("HotTopic", "collectRunId");
+  addColumnIfMissing("AiAnalysis", "collectRunId");
+
+  if (!tableNames().includes("CollectRunEvent")) {
+    database.exec(`CREATE TABLE "CollectRunEvent" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "runId" TEXT NOT NULL,
+      "level" TEXT NOT NULL,
+      "phase" TEXT NOT NULL,
+      "eventType" TEXT NOT NULL,
+      "message" TEXT NOT NULL,
+      "detailsJson" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "CollectRunEvent_runId_fkey" FOREIGN KEY ("runId") REFERENCES "CollectRun" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    );`);
+  }
+
+  const indexes = indexNames();
+  const indexStatements = [
+    ['RawItem_collectRunId_idx', 'CREATE INDEX "RawItem_collectRunId_idx" ON "RawItem"("collectRunId");'],
+    ['HotTopic_collectRunId_idx', 'CREATE INDEX "HotTopic_collectRunId_idx" ON "HotTopic"("collectRunId");'],
+    ['AiAnalysis_collectRunId_idx', 'CREATE INDEX "AiAnalysis_collectRunId_idx" ON "AiAnalysis"("collectRunId");'],
+    [
+      'CollectRunEvent_runId_createdAt_idx',
+      'CREATE INDEX "CollectRunEvent_runId_createdAt_idx" ON "CollectRunEvent"("runId", "createdAt");'
+    ],
+    ['CollectRunEvent_level_idx', 'CREATE INDEX "CollectRunEvent_level_idx" ON "CollectRunEvent"("level");'],
+    ['CollectRunEvent_phase_idx', 'CREATE INDEX "CollectRunEvent_phase_idx" ON "CollectRunEvent"("phase");'],
+    ['CollectRunEvent_eventType_idx', 'CREATE INDEX "CollectRunEvent_eventType_idx" ON "CollectRunEvent"("eventType");']
+  ];
+
+  for (const [name, statement] of indexStatements) {
+    if (!indexes.includes(name)) {
+      database.exec(statement);
+    }
   }
 }

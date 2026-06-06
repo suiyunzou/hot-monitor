@@ -62,6 +62,8 @@ model RawItem {
   id               String           @id @default(cuid())
   sourceId         String
   source           Source           @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  collectRunId     String?
+  collectRun       CollectRun?      @relation(fields: [collectRunId], references: [id], onDelete: SetNull)
   watchKeywordId   String?
   watchKeyword     WatchKeyword?    @relation(fields: [watchKeywordId], references: [id], onDelete: SetNull)
   externalId       String?
@@ -91,6 +93,7 @@ model RawItem {
   @@index([publishedAt])
   @@index([fetchedAt])
   @@index([sourceType])
+  @@index([collectRunId])
   @@index([watchKeywordId])
   @@index([engagementScore])
 }
@@ -121,6 +124,8 @@ model KolAccount {
 
 model HotTopic {
   id                String        @id @default(cuid())
+  collectRunId      String?
+  collectRun        CollectRun?   @relation(fields: [collectRunId], references: [id], onDelete: SetNull)
   title             String
   summary           String
   whyItMatters      String?
@@ -138,6 +143,7 @@ model HotTopic {
   emailItems        EmailDigestItem[]
 
   @@index([hotScore])
+  @@index([collectRunId])
   @@index([lastSeenAt])
   @@index([status])
 }
@@ -155,6 +161,8 @@ model TopicSource {
 
 model AiAnalysis {
   id             String   @id @default(cuid())
+  collectRunId   String?
+  collectRun     CollectRun? @relation(fields: [collectRunId], references: [id], onDelete: SetNull)
   topicId        String?
   topic          HotTopic? @relation(fields: [topicId], references: [id], onDelete: SetNull)
   model          String
@@ -166,6 +174,7 @@ model AiAnalysis {
   createdAt      DateTime @default(now())
 
   @@index([task])
+  @@index([collectRunId])
   @@index([createdAt])
 }
 
@@ -179,9 +188,30 @@ model CollectRun {
   newCount        Int              @default(0)
   errorMessage    String?
   metadataJson    String?
+  events          CollectRunEvent[]
+  rawItems        RawItem[]
+  hotTopics       HotTopic[]
+  aiAnalyses      AiAnalysis[]
 
   @@index([startedAt])
   @@index([status])
+}
+
+model CollectRunEvent {
+  id          String     @id @default(cuid())
+  runId       String
+  run         CollectRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  level       String
+  phase       String
+  eventType   String
+  message     String
+  detailsJson String?
+  createdAt   DateTime   @default(now())
+
+  @@index([runId, createdAt])
+  @@index([level])
+  @@index([phase])
+  @@index([eventType])
 }
 
 model EmailDigest {
