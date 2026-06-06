@@ -29,9 +29,11 @@ const collectorMap: Record<CollectorKind, SourceCollector> = {
 export async function runCollectors(options: RunCollectorOptions = {}) {
   await ensureDefaultSources();
   await ensureDefaultKolAccounts();
-  const selectedKinds = options.keywordOnly
-    ? []
-    : options.collectors?.length
+  // `keywordOnly` only means "also prioritize the watched-keyword search"; it
+  // must NOT zero out the regular collectors. Selected collectors and the
+  // keyword search run in parallel, so X / official / search keep running even
+  // when keywordOnly is true.
+  const selectedKinds = options.collectors?.length
     ? options.collectors
     : (Object.keys(collectorMap) as CollectorKind[]);
 

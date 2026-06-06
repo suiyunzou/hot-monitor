@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  AtSign,
   BadgeCheck,
   ExternalLink,
   Eye,
@@ -11,12 +12,14 @@ import {
   MessageCircle,
   Power,
   Radar,
+  Repeat2,
   Search,
   Send,
   ShieldAlert,
   Sparkles,
   Trash2,
   Users,
+  X,
   Zap
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -25,6 +28,7 @@ import type { ReactNode } from "react";
 type TopicStatus = "confirmed" | "multi-source" | "social" | "verify";
 type FilterKey = "all" | TopicStatus;
 type DatePreset = "1d" | "7d";
+type SortKey = "time" | "views" | "replies";
 
 type Topic = {
   id: string;
@@ -48,6 +52,7 @@ type TopicSource = {
   url: string;
   sourceName: string;
   sourceType: string;
+  author?: string | null;
   excerpt?: string | null;
   publishedAt?: string | null;
   fetchedAt?: string | null;
@@ -58,9 +63,11 @@ type TopicSource = {
 };
 
 type TopicEngagement = {
+  author?: string | null;
   views?: number | null;
   likes?: number | null;
   replies?: number | null;
+  retweets?: number | null;
 };
 
 export type WatchKeyword = {
@@ -175,6 +182,7 @@ export type HotTopicApiItem = {
     sourceType: string;
     sourceName: string;
     credibilityLevel: string;
+    author?: string | null;
     excerpt?: string | null;
     publishedAt?: string | null;
     fetchedAt?: string | null;
@@ -203,6 +211,12 @@ const datePresets: Array<{ key: DatePreset; label: string }> = [
   { key: "7d", label: "7天" }
 ];
 
+const sortOptions: Array<{ key: SortKey; label: string }> = [
+  { key: "time", label: "新闻时间" },
+  { key: "views", label: "观看量" },
+  { key: "replies", label: "评论数" }
+];
+
 const statusCopy: Record<TopicStatus, string> = {
   confirmed: "已确认",
   "multi-source": "多源线索",
@@ -225,6 +239,8 @@ export function RadarDashboard({
 }: RadarDashboardProps) {
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
   const [datePreset, setDatePreset] = useState<DatePreset>("7d");
+  const [sortKey, setSortKey] = useState<SortKey>("time");
+  const [searchQuery, setSearchQuery] = useState("");
   const [activeTopicId, setActiveTopicId] = useState(() => initialHotTopics[0]?.id ?? "");
   const [scanPulse, setScanPulse] = useState(0);
   const [liveTopics, setLiveTopics] = useState<Topic[]>(() => initialHotTopics.map(mapHotTopic));
@@ -257,7 +273,11 @@ export function RadarDashboard({
   const isScanningRef = useRef(isScanning);
   const watchKeywordsRef = useRef(watchKeywords);
 
-  const dateQuery = useMemo(() => buildDateQuery(datePreset), [datePreset]);
+  const trimmedSearch = searchQuery.trim();
+  const topicsQuery = useMemo(
+    () => buildTopicsQuery(datePreset, trimmedSearch),
+    [datePreset, trimmedSearch]
+  );
   const refreshSummary = useMemo(
     () => formatRefreshSummary(lastUpdatedAt, nextRefreshAt, clockNow),
     [clockNow, lastUpdatedAt, nextRefreshAt]
@@ -267,11 +287,18 @@ export function RadarDashboard({
   // stay as a "分析中" count until the pipeline summarizes + translates them.
   const dashboardTopics = useMemo(() => [...liveTopics].sort(compareTopicDate), [liveTopics]);
   const visibleTopics = useMemo(() => {
-    if (activeFilter === "all") {
-      return dashboardTopics;
-    }
-    return dashboardTopics.filter((topic) => topic.status === activeFilter);
-  }, [activeFilter, dashboardTopics]);
+    const query = searchQuery.trim().toLowerCase();
+    const filtered = dashboardTopics.filter((topic) => {
+      if (activeFilter !== "all" && topic.status !== activeFilter) {
+        return false;
+      }
+      if (query && !matchesSearch(topic, query)) {
+        return false;
+      }
+      return true;
+    });
+    return filtered.sort(getTopicComparator(sortKey));
+  }, [activeFilter, dashboardTopics, searchQuery, sortKey]);
 
   const activeTopic =
     dashboardTopics.find((topic) => topic.id === activeTopicId) ?? visibleTopics[0] ?? dashboardTopics[0];
@@ -317,9 +344,12 @@ export function RadarDashboard({
   }, [watchKeywords]);
 
   useEffect(() => {
-    void refreshDashboard();
+    const handle = window.setTimeout(() => {
+      void refreshDashboard();
+    }, 300);
+    return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateQuery]);
+  }, [topicsQuery]);
 
   useEffect(() => {
     if (!isScanning) {
@@ -360,7 +390,7 @@ export function RadarDashboard({
   }
 
   async function loadHotTopics() {
-    const response = await fetch(`/api/analyze${dateQuery}`, { cache: "no-store" });
+    const response = await fetch(`/api/analyze${topicsQuery}`, { cache: "no-store" });
     if (!response.ok) {
       return;
     }
@@ -623,7 +653,7 @@ export function RadarDashboard({
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          collectors: ["search"],
+          collectors: ["search", "twitterapi-io", "official"],
           keywordOnly: watchKeywordsRef.current.some((keyword) => keyword.enabled),
           limit: 5,
           background: true,
@@ -758,6 +788,43 @@ export function RadarDashboard({
               {filter.label}
             </button>
           ))}
+        </div>
+
+        <div className="filter-dock__tools">
+          <div className="filter-search">
+            <Search size={15} aria-hidden="true" />
+            <input
+              aria-label="搜索热点"
+              maxLength={80}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="搜索标题 / 摘要 / 来源 / 作者"
+              type="text"
+              value={searchQuery}
+            />
+            {searchQuery ? (
+              <button
+                className="filter-search__clear"
+                type="button"
+                aria-label="清除搜索"
+                title="清除搜索"
+                onClick={() => setSearchQuery("")}
+              >
+                <X size={14} />
+              </button>
+            ) : null}
+          </div>
+          <div className="sort-filter" role="group" aria-label="sort topics">
+            {sortOptions.map((option) => (
+              <button
+                className={sortKey === option.key ? "is-active" : ""}
+                key={option.key}
+                type="button"
+                onClick={() => setSortKey(option.key)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="date-filter" aria-label="news date filters">
@@ -987,14 +1054,30 @@ export function RadarDashboard({
 
                 {topic.engagement ? (
                   <div className="topic__engagement" aria-label="x engagement">
-                    {topic.engagement.views != null ? (
-                      <span><Eye size={13} />{formatCount(topic.engagement.views)}</span>
+                    <span className="topic__engagement-badge">X</span>
+                    {topic.engagement.author ? (
+                      <a
+                        className="topic__engagement-author"
+                        href={`https://x.com/${topic.engagement.author}`}
+                        rel="noreferrer"
+                        target="_blank"
+                        title={`@${topic.engagement.author}`}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <AtSign size={13} />{topic.engagement.author}
+                      </a>
                     ) : null}
-                    {topic.engagement.likes != null ? (
-                      <span><Heart size={13} />{formatCount(topic.engagement.likes)}</span>
+                    {topic.engagement.views != null ? (
+                      <span title="浏览量"><Eye size={13} />{formatCount(topic.engagement.views)}</span>
                     ) : null}
                     {topic.engagement.replies != null ? (
-                      <span><MessageCircle size={13} />{formatCount(topic.engagement.replies)}</span>
+                      <span title="评论数"><MessageCircle size={13} />{formatCount(topic.engagement.replies)}</span>
+                    ) : null}
+                    {topic.engagement.likes != null ? (
+                      <span title="点赞数"><Heart size={13} />{formatCount(topic.engagement.likes)}</span>
+                    ) : null}
+                    {topic.engagement.retweets != null ? (
+                      <span title="转发数"><Repeat2 size={13} />{formatCount(topic.engagement.retweets)}</span>
                     ) : null}
                   </div>
                 ) : null}
@@ -1093,9 +1176,19 @@ function mapHotTopic(topic: HotTopicApiItem): Topic {
     sourceTypes: Array.from(new Set(topic.sources.map((source) => source.sourceType))),
     sources: topic.sources,
     engagement: pickTopEngagement(topic.sources),
+    totalViews: sumSourceMetric(topic.sources, "viewCount"),
+    totalReplies: sumSourceMetric(topic.sources, "replyCount"),
     dateLabel: formatDateLabel(dateValue),
     dateValue
   };
+}
+
+/** Aggregate a numeric engagement metric across all sources for sorting. */
+function sumSourceMetric(
+  sources: HotTopicApiItem["sources"],
+  key: "viewCount" | "replyCount"
+) {
+  return sources.reduce((total, source) => total + (source[key] ?? 0), 0);
 }
 
 /** Engagement of the most-liked tweet source, for the card's metric chips. */
@@ -1110,7 +1203,13 @@ function pickTopEngagement(sources: HotTopicApiItem["sources"]): TopicEngagement
   const top = tweets.reduce((best, current) =>
     (current.likeCount ?? 0) > (best.likeCount ?? 0) ? current : best
   );
-  return { views: top.viewCount, likes: top.likeCount, replies: top.replyCount };
+  return {
+    author: top.author,
+    views: top.viewCount,
+    likes: top.likeCount,
+    replies: top.replyCount,
+    retweets: top.retweetCount
+  };
 }
 
 function mapTopicStatus(status: HotTopicApiItem["status"], needsVerification: boolean): TopicStatus {
@@ -1126,14 +1225,20 @@ function mapTopicStatus(status: HotTopicApiItem["status"], needsVerification: bo
   return "confirmed";
 }
 
-function buildDateQuery(preset: DatePreset) {
+function buildTopicsQuery(preset: DatePreset, search: string) {
   const params = new URLSearchParams();
-  const now = new Date();
-  const start = new Date(now);
-  const days = preset === "1d" ? 0 : 6;
-  start.setDate(now.getDate() - days);
-  params.set("startDate", toDateInputValue(start));
-  params.set("endDate", toDateInputValue(now));
+
+  if (search) {
+    // Searching looks across all topics regardless of the date window.
+    params.set("q", search);
+  } else {
+    const now = new Date();
+    const start = new Date(now);
+    const days = preset === "1d" ? 0 : 6;
+    start.setDate(now.getDate() - days);
+    params.set("startDate", toDateInputValue(start));
+    params.set("endDate", toDateInputValue(now));
+  }
 
   const query = params.toString();
   return query ? `?${query}` : "";
@@ -1255,6 +1360,33 @@ function formatDateLabel(value?: string | null) {
 
 function compareTopicDate(a: Topic, b: Topic) {
   return new Date(b.dateValue).getTime() - new Date(a.dateValue).getTime();
+}
+
+/** Sort by the selected dimension (descending), falling back to recency on ties. */
+function getTopicComparator(sortKey: SortKey): (a: Topic, b: Topic) => number {
+  if (sortKey === "views") {
+    return (a, b) => b.totalViews - a.totalViews || compareTopicDate(a, b);
+  }
+  if (sortKey === "replies") {
+    return (a, b) => b.totalReplies - a.totalReplies || compareTopicDate(a, b);
+  }
+  return compareTopicDate;
+}
+
+/** Case-insensitive keyword match across a topic's text and source metadata. */
+function matchesSearch(topic: Topic, query: string) {
+  const haystack = [
+    topic.title,
+    topic.summary,
+    topic.why,
+    topic.category,
+    ...topic.sources.map((source) => source.sourceName ?? ""),
+    ...topic.sources.map((source) => source.title ?? ""),
+    ...topic.sources.map((source) => source.author ?? "")
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(query);
 }
 
 function trimText(value: string, maxLength: number) {

@@ -1,6 +1,8 @@
 # 当前项目状态
 
-更新时间：2026-06-04
+更新时间：2026-06-06
+
+> 2026-06-06：本次设计讨论确定了新方向（社交/官方主导热度、搜索降级为验证层、X 发现-验证分档、打分加确定性锚点、搜索分词、时效分层），并定位了 P0 阻断问题。完整需求与 P0–P3 计划见 `docs/requirements-plan.md` 第 12、13 节。下文「已知问题/根因」「下一步建议」已与之对齐。
 
 ## 本地运行
 
@@ -16,9 +18,27 @@ http://localhost:3000
 npm run dev
 npm run typecheck
 npm run build
+npm run db:apply          # 应用增量迁移
+npm run db:reset-content  # 清采集/分析内容，保留 Source/WatchKeyword/KolAccount
 ```
 
-注意：开发时优先使用 `http://localhost:3000`。如果使用 `127.0.0.1:3000`，Next.js dev server 可能阻止 HMR 资源，导致部分前端交互看起来没有响应。
+注意：开发时优先使用 `http://localhost:3000`。如果使用 `127.0.0.1:3000`，Next.js dev server 会阻止跨 origin 的 HMR 资源，客户端水合失败 → 出现“按钮点击无反应”假象。已在 `next.config.ts` 加 `allowedDevOrigins` 缓解，但仍建议用 localhost。
+
+## 环境变量
+
+当前以 **Windows 用户级系统环境变量** 配置，`.env` 文件可为空：
+
+- `OPENROUTER_API_KEY`：分析 + 翻译必需（`src/lib/ai/openrouter.ts`）。
+- `OPENROUTER_MODEL`：可选，默认 `deepseek/deepseek-v4-flash`；若报模型不存在，设为 OpenRouter 上真实存在的 ID（如 `deepseek/deepseek-chat`）。
+- `TWITTERAPI_IO_KEY`：twitterapi.io 的 API 密钥，抓 X 与互动数据必需（`src/lib/collectors/twitterapi-io.ts`）。
+- `SMTP_HOST/PORT/USER/PASS`、`MAIL_FROM/MAIL_TO`：邮件日报必需。
+
+要点：
+
+- `process.env` 同时含「系统环境变量」与「`.env`」，进程继承 OS 变量，所以不写进 `.env` 也能用。
+- 环境变量只对“设置之后启动”的进程生效；改了 key 要重开终端再 `npm run dev`。
+- dotenv 默认**不覆盖**已存在的 `process.env`：同名时系统变量优先、`.env` 被忽略。要以 `.env` 为准须删系统变量或开启 override。
+- `COLLECT_INTERVAL_HOURS` 是**死配置**（代码未引用），改它无效；真实自动采集间隔硬编码 **1 小时**（`src/components/radar-dashboard.tsx`，仅页面打开时生效）。
 
 ## 当前已验证
 
@@ -144,6 +164,29 @@ AI 分析：
 - 开关点击后立即更新本地视觉状态。
 - PATCH 保存失败时回滚，并在状态栏显示错误。
 
+## 已知问题与根因（2026-06-06）
+
+按优先级排列，详见 `docs/requirements-plan.md` 第 13 节。
+
+P0（阻断级，须先修）：
+
+- **两个 key 空导致空跑**：项目原先无 `.env`，`TWITTERAPI_IO_KEY` / `OPENROUTER_API_KEY` 为空时 X 采集与 AI 分析直接空转。用户已在本地系统环境变量配置，正在另行验证生效中。
+- **采集编排 bug：X 采集器从未被自动调用**。根因有两处：
+  - `src/components/radar-dashboard.tsx` 的 `triggerScan` 只发 `collectors:["search"]`，自动扫描不带 `twitterapi-io` / `official`。
+  - `src/lib/collectors/run-collectors.ts` 中 `selectedKinds = options.keywordOnly ? [] : ...`，当 `keywordOnly=true`（有启用关键词时）会把 `selectedKinds` 清零，导致连 search/official/twitterapi-io 都不跑。
+  - 修复方向：改为「关注关键词搜索 + 选定采集器并行」，并让自动扫描真正带上 `twitterapi-io`。
+
+P1（核心改造）：
+
+- **热度纯 AI 主观分**：`fuseHotScore`（`src/lib/ai/analyze-raw-items.ts`）仅在存在 `TWITTER`+`engagementScore` 时用 `0.6·AI+0.4·参与度`，否则退化为纯 AI 分；登陆页/维基/纯摘要也能拿高分，`hotScore` 在 5/95 间跳变。需为非社交来源加确定性锚点（来源档位+新鲜度+多源佐证）。
+- **来源可靠 ≠ 信息为真**：当前对 X 推文只做识别/摘要/评分，没有声明抽取、推文类型分档、定向验证、状态升级。需新增 X 发现-验证流程。
+- **搜索只能完全匹配**：`buildTopicSearchWhere`（`src/app/api/analyze/route.ts`）用 `contains` 整串精确子串、中文不分词。需切词+同义/中英映射。
+
+P2（调优）：
+
+- **时效一刀切 + 旧页伪装新闻**：日期筛选只有 `1天/7天` 硬窗口；缺 `publishedAt` 时回退 `fetchedAt` 会把旧页当新新闻。需按来源类型指数衰减、缺真实发布时间不计入热度、X 默认只抓最近 2 小时。
+- **推文过滤阈值**：`isTweetWorthKeeping` 阈值需在 key 配齐、X 采集跑通后按真实数据调优。
+
 ## 当前限制
 
 - 页面内 1 小时自动刷新依赖浏览器页面打开；还没有独立后端 scheduler。
@@ -152,10 +195,33 @@ AI 分析：
 - 本地数据库里仍有早期测试数据和部分噪声结果，后续可清洗或重建。
 - AI 热点聚类仍是初版，尚未做同事件持续合并。
 
-## 下一步建议
+## 下一步建议（按优先级，对齐 P0–P3）
 
-1. 引入正式搜索服务，替代 Google/Bing 网页抓取。
-2. 为关键词增加可配置同义词/扩展词表，而不是只在代码里写死。
-3. 增加采集详情页，展示每次运行的 query、候选 URL、过滤原因、落地页错误和去重原因。
-4. 实现后端定时任务，不依赖浏览器页面打开。
-5. 增加数据清洗脚本，清理早期噪声和乱码数据。
+P0（先修阻断）：
+
+1. 配置 `.env` 的 `TWITTERAPI_IO_KEY` / `OPENROUTER_API_KEY` 并验证生效（X 采集、AI 分析跑通）。
+2. 修复采集编排：`run-collectors.ts` 的 `keywordOnly` 清零 bug + `triggerScan` 自动扫描带上 `twitterapi-io`，实现「关键词搜索 + 选定采集器并行」。
+
+P1（核心改造，搜索分词可并行）：
+
+3. X 帖子声明抽取与分档验证流程（官方自宣只富化 / 爆料重验证 / 观点不证真；定向中英双语限时查询 → 状态升级或标 `NEEDS_VERIFICATION`）。
+4. 打分加确定性锚点：非社交来源引入「来源档位 + 新鲜度 + 多源佐证」基线，与 AI 分加权；snippet-only / 抓取失败强制降权。
+5. 搜索分词 + 同义/中英映射（切词 + 中文 bi-gram 兜底 + 多 `OR contains`，复用 `expandKnownKeyword`）。
+
+P2（调优）：
+
+6. 分来源新鲜度指数衰减；缺真实 `publishedAt` 不计入热度；X 默认只抓最近 2 小时。
+7. 调优 `isTweetWorthKeeping` 过滤阈值。
+
+P3（检索升级）：
+
+8. SQLite FTS5（BM25）全文检索。
+9. embedding 语义检索 + LLM 重排。
+
+长期工程项（与上面并行推进）：
+
+10. 引入正式搜索服务，替代 Google/Bing 网页抓取。
+11. 把关键词同义词/扩展词表从代码迁到配置/数据库。
+12. 增加采集详情页，展示每次运行的 query、候选 URL、过滤原因、落地页错误和去重原因。
+13. 实现后端定时任务，不依赖浏览器页面打开。
+14. 增加数据清洗脚本，清理早期噪声和乱码数据。

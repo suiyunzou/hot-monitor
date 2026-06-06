@@ -12,12 +12,13 @@ const analyzeRequestSchema = z.object({
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const topicWhere = buildTopicNewsDateWhere(searchParams);
+  const searchTerm = (searchParams.get("q") ?? "").trim();
+  const topicWhere = buildTopicWhere(searchParams, searchTerm);
   const [topics, pendingRawItems] = await Promise.all([
     prisma.hotTopic.findMany({
       where: topicWhere,
       orderBy: [{ hotScore: "desc" }, { lastSeenAt: "desc" }],
-      take: 12,
+      take: searchTerm ? 60 : 24,
       include: {
         sources: {
           include: {
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
                 url: true,
                 sourceType: true,
                 credibilityLevel: true,
+                author: true,
                 excerpt: true,
                 publishedAt: true,
                 fetchedAt: true,
@@ -52,11 +54,13 @@ export async function GET(request: Request) {
     })
   ]);
 
+  const dedupedTopics = dedupeTopics(topics).slice(0, searchTerm ? 50 : 12);
+
   return NextResponse.json({
     analysisConfigured: Boolean(process.env.OPENROUTER_API_KEY),
     model: process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash",
     pendingRawItems,
-    topics: topics.map((topic) => ({
+    topics: dedupedTopics.map((topic) => ({
       id: topic.id,
       title: topic.title,
       summary: topic.summary,
@@ -72,6 +76,7 @@ export async function GET(request: Request) {
         sourceType: source.rawItem.sourceType,
         sourceName: source.rawItem.source.name,
         credibilityLevel: source.rawItem.credibilityLevel,
+        author: source.rawItem.author,
         excerpt: source.rawItem.excerpt,
         publishedAt: source.rawItem.publishedAt,
         fetchedAt: source.rawItem.fetchedAt,
@@ -129,6 +134,55 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   }
+}
+
+/** When a keyword is present, search across all topics (ignoring the date window) so
+ * older posts and X sources can still be found; otherwise constrain by the date range. */
+function buildTopicWhere(
+  searchParams: URLSearchParams,
+  searchTerm: string
+): Prisma.HotTopicWhereInput | undefined {
+  if (searchTerm) {
+    return buildTopicSearchWhere(searchTerm);
+  }
+  return buildTopicNewsDateWhere(searchParams);
+}
+
+function buildTopicSearchWhere(term: string): Prisma.HotTopicWhereInput {
+  return {
+    OR: [
+      { title: { contains: term } },
+      { summary: { contains: term } },
+      { whyItMatters: { contains: term } },
+      { category: { contains: term } },
+      {
+        sources: {
+          some: {
+            rawItem: {
+              OR: [
+                { title: { contains: term } },
+                { author: { contains: term } },
+                { source: { name: { contains: term } } }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  };
+}
+
+/** Collapse near-identical AI topics (same normalized title) to the highest-scored one. */
+function dedupeTopics<T extends { title: string; hotScore: number }>(topics: T[]): T[] {
+  const byTitle = new Map<string, T>();
+  for (const topic of topics) {
+    const key = topic.title.replace(/\s+/g, "").toLowerCase();
+    const existing = byTitle.get(key);
+    if (!existing || topic.hotScore > existing.hotScore) {
+      byTitle.set(key, topic);
+    }
+  }
+  return Array.from(byTitle.values());
 }
 
 function buildTopicNewsDateWhere(searchParams: URLSearchParams): Prisma.HotTopicWhereInput | undefined {

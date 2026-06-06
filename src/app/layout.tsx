@@ -13,8 +13,8 @@ export default function RootLayout({
   children: ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
-      <body>
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body suppressHydrationWarning>
         {children}
         <script
           dangerouslySetInnerHTML={{
@@ -94,7 +94,7 @@ export default function RootLayout({
         const response = await fetch("/api/collect", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ collectors: ["search"], keywordOnly: true, limit: 1, background: true })
+          body: JSON.stringify({ collectors: ["search", "twitterapi-io", "official"], keywordOnly: true, limit: 1, background: true })
         });
         if (!response.ok) throw new Error("collect failed");
         window.setTimeout(() => void refreshCollectStatus(), 900);
