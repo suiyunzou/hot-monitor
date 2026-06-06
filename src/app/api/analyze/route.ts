@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 import { prisma } from "@/lib/db/prisma";
 import { analyzeRawItems } from "@/lib/ai/analyze-raw-items";
+import { buildRawItemNewsDateWhere } from "@/lib/stats/raw-item-date-range";
+import { getSourceCoverage } from "@/lib/stats/source-coverage";
 import type { Prisma } from "@/generated/prisma/client";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +16,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const searchTerm = (searchParams.get("q") ?? "").trim();
   const topicWhere = buildTopicWhere(searchParams, searchTerm);
-  const [topics, pendingRawItems] = await Promise.all([
+  const [topics, pendingRawItems, sourceCoverage] = await Promise.all([
     prisma.hotTopic.findMany({
       where: topicWhere,
       orderBy: [{ hotScore: "desc" }, { lastSeenAt: "desc" }],
@@ -52,7 +54,8 @@ export async function GET(request: Request) {
       where: {
         status: "NEW"
       }
-    })
+    }),
+    getSourceCoverage(searchParams)
   ]);
 
   const dedupedTopics = dedupeTopics(topics).slice(0, searchTerm ? 50 : 12);
@@ -61,6 +64,7 @@ export async function GET(request: Request) {
     analysisConfigured: Boolean(process.env.OPENROUTER_API_KEY),
     model: process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash",
     pendingRawItems,
+    sourceCoverage,
     topics: dedupedTopics.map((topic) => ({
       id: topic.id,
       title: topic.title,
@@ -216,50 +220,3 @@ function buildTopicNewsDateWhere(searchParams: URLSearchParams): Prisma.HotTopic
   };
 }
 
-function buildRawItemNewsDateWhere(searchParams: URLSearchParams): Prisma.RawItemWhereInput | undefined {
-  const start = parseDateParam(searchParams.get("startDate"), "start");
-  const end = parseDateParam(searchParams.get("endDate"), "end");
-
-  if (!start && !end) {
-    return undefined;
-  }
-
-  const range: Prisma.DateTimeFilter = {};
-  if (start) {
-    range.gte = start;
-  }
-  if (end) {
-    range.lte = end;
-  }
-
-  return {
-    OR: [
-      {
-        publishedAt: range
-      },
-      {
-        publishedAt: null,
-        fetchedAt: range
-      }
-    ]
-  };
-}
-
-function parseDateParam(value: string | null, boundary: "start" | "end") {
-  if (!value) {
-    return undefined;
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return undefined;
-  }
-
-  if (boundary === "start") {
-    date.setHours(0, 0, 0, 0);
-  } else {
-    date.setHours(23, 59, 59, 999);
-  }
-
-  return date;
-}

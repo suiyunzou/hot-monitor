@@ -32,3 +32,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
   return NextResponse.json({ keyword: saved });
 }
+
+export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params;
+  await prisma.watchKeyword.delete({ where: { id } });
+  return NextResponse.json({ ok: true });
+}

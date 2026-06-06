@@ -4,6 +4,7 @@ import {
   Activity,
   AtSign,
   BadgeCheck,
+  ChevronDown,
   ExternalLink,
   Eye,
   Globe2,
@@ -16,6 +17,7 @@ import {
   Search,
   Send,
   ShieldAlert,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
   Users,
@@ -29,6 +31,7 @@ type TopicStatus = "confirmed" | "multi-source" | "social" | "verify";
 type FilterKey = "all" | TopicStatus;
 type DatePreset = "1d" | "7d";
 type SortKey = "time" | "views" | "replies";
+type ConfigTab = "keywords" | "kol" | "email";
 
 type Topic = {
   id: string;
@@ -165,7 +168,15 @@ type AnalyzeApiResponse = {
   analysisConfigured: boolean;
   model: string;
   pendingRawItems: number;
+  sourceCoverage: SourceCoverage;
   topics: HotTopicApiItem[];
+};
+
+type SourceCoverage = {
+  official: number;
+  search: number;
+  social: number;
+  total: number;
 };
 
 export type HotTopicApiItem = {
@@ -235,6 +246,37 @@ const statusIcon: Record<TopicStatus, ReactNode> = {
 
 const AUTO_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
+function formatPipelineSummary(
+  details: CollectRunDetails | null,
+  pendingRawItems: number,
+  isScanning: boolean
+) {
+  if (!details) {
+    return isScanning ? "采集中…" : "暂无运行记录";
+  }
+
+  const { run, hotTopics } = details;
+  let statusText: string;
+  if (isScanning || run.status === "RUNNING") {
+    statusText = "采集中";
+  } else if (run.status === "FAILED") {
+    statusText = "失败";
+  } else if (run.status === "PARTIAL_SUCCESS") {
+    statusText = "部分完成";
+  } else {
+    statusText = "完成";
+  }
+
+  const parts = [statusText, `新增 ${run.newCount}`];
+  if (pendingRawItems > 0) {
+    parts.push(`待分析 ${pendingRawItems}`);
+  } else if (hotTopics.length > 0) {
+    parts.push(`热点 ${hotTopics.length}`);
+  }
+
+  return parts.join(" · ");
+}
+
 export function RadarDashboard({
   initialHotTopics = [],
   initialWatchKeywords = []
@@ -253,6 +295,12 @@ export function RadarDashboard({
   const [analysisStatus, setAnalysisStatus] = useState("等待自动分析");
   const [analysisModel, setAnalysisModel] = useState("deepseek/deepseek-v4-flash");
   const [pendingRawItems, setPendingRawItems] = useState(0);
+  const [sourceCoverage, setSourceCoverage] = useState<SourceCoverage>({
+    official: 0,
+    search: 0,
+    social: 0,
+    total: 0
+  });
   const [analysisConfigured, setAnalysisConfigured] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -271,6 +319,9 @@ export function RadarDashboard({
   const [nextRefreshAt, setNextRefreshAt] = useState<Date>(() => getNextScheduledRefresh(new Date()));
   const [clockNow, setClockNow] = useState<Date>(() => new Date());
   const [mounted, setMounted] = useState(false);
+  const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
+  const [configTab, setConfigTab] = useState<ConfigTab>("keywords");
+  const [pipelineExpanded, setPipelineExpanded] = useState(false);
   const lastAutoAnalyzeAt = useRef(0);
   const isScanningRef = useRef(isScanning);
   const watchKeywordsRef = useRef(watchKeywords);
@@ -283,6 +334,16 @@ export function RadarDashboard({
   const refreshSummary = useMemo(
     () => formatRefreshSummary(lastUpdatedAt, nextRefreshAt, clockNow),
     [clockNow, lastUpdatedAt, nextRefreshAt]
+  );
+  const configSummary = useMemo(() => {
+    const enabledKeywords = watchKeywords.filter((keyword) => keyword.enabled).length;
+    const kolCount = kolAccounts.length;
+    const emailLabel = emailConfigured ? "邮件已配置" : "邮件未配置";
+    return `${enabledKeywords} 个关键词 · ${kolCount} 个 KOL · ${emailLabel}`;
+  }, [emailConfigured, kolAccounts, watchKeywords]);
+  const pipelineSummary = useMemo(
+    () => formatPipelineSummary(runDetails, pendingRawItems, isScanning),
+    [isScanning, pendingRawItems, runDetails]
   );
 
   // Only AI-analyzed (Chinese, scored) topics become cards. Raw collected items
@@ -372,6 +433,27 @@ export function RadarDashboard({
   }, [activeTopicId, dashboardTopics]);
 
   useEffect(() => {
+    if (!configDrawerOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setConfigDrawerOpen(false);
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [configDrawerOpen]);
+
+  useEffect(() => {
     if (!analysisConfigured || pendingRawItems === 0 || isAnalyzing) {
       return;
     }
@@ -401,6 +483,7 @@ export function RadarDashboard({
     setAnalysisConfigured(data.analysisConfigured);
     setAnalysisModel(data.model);
     setPendingRawItems(data.pendingRawItems);
+    setSourceCoverage(data.sourceCoverage ?? { official: 0, search: 0, social: 0, total: 0 });
     setAnalysisStatus(formatAnalysisStatus(data));
     setLiveTopics(data.topics.map(mapHotTopic));
   }
@@ -634,6 +717,23 @@ export function RadarDashboard({
     }
   }
 
+  async function deleteWatchKeyword(keyword: WatchKeyword) {
+    setPendingKeywordIds((current) => [...current, keyword.id]);
+    const previous = watchKeywords;
+    setWatchKeywords((current) => current.filter((item) => item.id !== keyword.id));
+
+    try {
+      const response = await fetch(`/api/watch-keywords/${keyword.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("删除失败");
+      }
+    } catch {
+      setWatchKeywords(previous);
+    } finally {
+      setPendingKeywordIds((current) => current.filter((id) => id !== keyword.id));
+    }
+  }
+
   async function triggerScan(options: { automatic?: boolean } = {}) {
     if (isScanningRef.current) {
       if (options.automatic) {
@@ -738,6 +838,15 @@ export function RadarDashboard({
     setDatePreset(preset);
   }
 
+  function openConfigDrawer(tab: ConfigTab = "keywords") {
+    setConfigTab(tab);
+    setConfigDrawerOpen(true);
+  }
+
+  function closeConfigDrawer() {
+    setConfigDrawerOpen(false);
+  }
+
   return (
     <main className="shell">
       <header className="topbar">
@@ -765,6 +874,16 @@ export function RadarDashboard({
         </div>
 
         <div className="topbar__actions">
+          <button
+            className="config-button"
+            type="button"
+            aria-expanded={configDrawerOpen}
+            aria-controls="collect-config-drawer"
+            onClick={() => openConfigDrawer()}
+          >
+            <SlidersHorizontal size={16} />
+            采集配置
+          </button>
           <button
             className="scan-button"
             data-hot-monitor-scan="true"
@@ -860,136 +979,31 @@ export function RadarDashboard({
         <aside className="source-rail" aria-label="source coverage">
           <div className="panel-title">
             <Activity size={18} />
-            <span>来源与关键词</span>
+            <span>来源覆盖</span>
           </div>
-          <SourceMeter label="官方与原始来源" value={72} note="优先作为事实锚点" />
-          <SourceMeter label="搜索发现" value={63} note="用于发现和交叉验证" />
-          <SourceMeter label="社交信号" value={54} note="只作为早期趋势" />
-          <form className="keyword-box" onSubmit={addWatchKeyword}>
-            <label htmlFor="watch-keyword">关注关键词</label>
-            <div>
-              <input
-                id="watch-keyword"
-                maxLength={80}
-                onChange={(event) => setKeywordInput(event.target.value)}
-                placeholder="Claude Code / MCP"
-                value={keywordInput}
-              />
-              <button type="submit">添加</button>
-            </div>
-          </form>
-          <div className="keyword-list" aria-label="watch keywords">
-            {!keywordsLoaded ? (
-              <span className="keyword-empty">正在读取关注词</span>
-            ) : watchKeywords.length === 0 ? (
-              <span className="keyword-empty">暂无自定义关注词</span>
-            ) : (
-              watchKeywords.map((keyword) => (
-                <button
-                  className={keyword.enabled ? "keyword-chip is-enabled" : "keyword-chip"}
-                  key={keyword.id}
-                  aria-pressed={keyword.enabled}
-                  disabled={pendingKeywordIds.includes(keyword.id)}
-                  type="button"
-                  onClick={() => void toggleWatchKeyword(keyword)}
-                >
-                  <span className="keyword-chip__label">{keyword.keyword}</span>
-                  <span className="keyword-switch" aria-hidden="true">
-                    <span className="keyword-switch__knob">
-                      <Power size={11} />
-                    </span>
-                  </span>
-                  <strong>{keyword.enabled ? "启用" : "停用"}</strong>
-                </button>
-              ))
-            )}
-          </div>
-
-          <div className="kol-box" aria-label="kol whitelist">
-            <div className="kol-box__head">
-              <Users size={16} />
-              <span>关注账号 · X KOL</span>
-            </div>
-            <form className="kol-form" onSubmit={addKolAccount}>
-              <input
-                aria-label="KOL handle"
-                maxLength={40}
-                onChange={(event) => setKolHandleInput(event.target.value)}
-                placeholder="@handle 如 sama"
-                value={kolHandleInput}
-              />
-              <select
-                aria-label="KOL 层级"
-                value={kolTierInput}
-                onChange={(event) => setKolTierInput(Number(event.target.value) === 1 ? 1 : 2)}
-              >
-                <option value={1}>官方</option>
-                <option value={2}>大V</option>
-              </select>
-              <button type="submit">添加</button>
-            </form>
-            <div className="kol-list">
-              {!kolLoaded ? (
-                <span className="keyword-empty">正在读取关注账号</span>
-              ) : kolAccounts.length === 0 ? (
-                <span className="keyword-empty">暂无关注账号</span>
-              ) : (
-                kolAccounts.map((account) => (
-                  <div
-                    className={account.enabled ? "kol-item is-enabled" : "kol-item"}
-                    key={account.id}
-                  >
-                    <button
-                      className="kol-item__main"
-                      type="button"
-                      aria-pressed={account.enabled}
-                      disabled={pendingKolIds.includes(account.id)}
-                      onClick={() => void toggleKolAccount(account)}
-                      title={account.enabled ? "点击停用" : "点击启用"}
-                    >
-                      <span className={account.tier === 1 ? "kol-tier kol-tier--official" : "kol-tier"}>
-                        {account.tier === 1 ? "官方" : "大V"}
-                      </span>
-                      <span className="kol-item__handle">@{account.handle}</span>
-                      <strong>{account.enabled ? "启用" : "停用"}</strong>
-                    </button>
-                    <button
-                      className="kol-item__delete"
-                      type="button"
-                      aria-label={`删除 ${account.handle}`}
-                      disabled={pendingKolIds.includes(account.id)}
-                      onClick={() => void deleteKolAccount(account)}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="email-box" aria-label="email digest">
-            <div className="email-box__head">
-              <Mail size={16} />
-              <span>邮件日报</span>
-              <em className={emailConfigured ? "email-box__dot is-on" : "email-box__dot"} aria-hidden="true" />
-            </div>
-            <p className="email-box__status">{emailStatus}</p>
-            <p className="email-box__meta">
-              {emailConfigured
-                ? `收件人 ${emailRecipient ?? "—"} · 待发送 ${unsentTopicCount} 条`
-                : "在环境变量填写 SMTP 配置后启用，未发送过的热点不会重复推送。"}
-            </p>
-            <button
-              className="email-box__send"
-              type="button"
-              disabled={isSendingEmail || !emailConfigured}
-              onClick={() => void sendEmailDigest()}
-            >
-              <Send size={14} />
-              {isSendingEmail ? "发送中" : "发送热点日报"}
-            </button>
-          </div>
+          <SourceMeter
+            label="官方与原始来源"
+            value={sourceCoverage.official}
+            note={sourceCoverage.total === 0 ? "暂无数据" : "优先作为事实锚点"}
+          />
+          <SourceMeter
+            label="搜索发现"
+            value={sourceCoverage.search}
+            note={sourceCoverage.total === 0 ? "暂无数据" : "用于发现和交叉验证"}
+          />
+          <SourceMeter
+            label="社交信号"
+            value={sourceCoverage.social}
+            note={sourceCoverage.total === 0 ? "暂无数据" : "只作为早期趋势"}
+          />
+          <button
+            className="source-rail__summary"
+            type="button"
+            aria-label="打开采集配置"
+            onClick={() => openConfigDrawer()}
+          >
+            {configSummary}
+          </button>
         </aside>
 
         <section className="topic-stack" aria-label="hot topics">
@@ -1148,15 +1162,244 @@ export function RadarDashboard({
               </div>
             </div>
           ) : null}
-          <DataFlowPanel details={runDetails} />
-          <ol>
-            <li>新闻日期优先使用原文发布日期，没有发布日期时使用抓取时间。</li>
-            <li>AI 分析在采集后自动执行，不需要用户悬浮或点击。</li>
-            <li>卡片摘要来自 AI 热点结果；未分析线索使用原始摘要和正文截断。</li>
-            <li>同一来源同一 URL 已存在时会去重，不会重复入库。</li>
-          </ol>
+          <div className="audit-panel__pipeline">
+            <button
+              className={`audit-panel__summary ${pipelineExpanded ? "is-expanded" : ""}`}
+              type="button"
+              aria-expanded={pipelineExpanded}
+              aria-controls="audit-pipeline-details"
+              onClick={() => setPipelineExpanded((expanded) => !expanded)}
+            >
+              <ChevronDown className="audit-panel__chevron" size={14} aria-hidden="true" />
+              <span className="audit-panel__summary-text">{pipelineSummary}</span>
+              <span className="audit-panel__summary-action">运行详情</span>
+            </button>
+            {pipelineExpanded ? (
+              <div className="audit-panel__details" id="audit-pipeline-details">
+                <DataFlowPanel details={runDetails} />
+                <ol>
+                  <li>新闻日期优先使用原文发布日期，没有发布日期时使用抓取时间。</li>
+                  <li>AI 分析在采集后自动执行，不需要用户悬浮或点击。</li>
+                  <li>卡片摘要来自 AI 热点结果；未分析线索使用原始摘要和正文截断。</li>
+                  <li>同一来源同一 URL 已存在时会去重，不会重复入库。</li>
+                </ol>
+              </div>
+            ) : null}
+          </div>
         </aside>
       </section>
+
+      {configDrawerOpen ? (
+        <div
+          className="config-drawer"
+          id="collect-config-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="config-drawer-title"
+        >
+          <button
+            className="config-drawer__backdrop"
+            type="button"
+            aria-label="关闭采集配置"
+            onClick={closeConfigDrawer}
+          />
+          <div className="config-drawer__panel">
+            <header className="config-drawer__header">
+              <div>
+                <p className="eyebrow">COLLECT CONFIG</p>
+                <h2 id="config-drawer-title">采集配置</h2>
+              </div>
+              <button
+                className="config-drawer__close"
+                type="button"
+                aria-label="关闭"
+                onClick={closeConfigDrawer}
+              >
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="config-drawer__tabs" role="tablist" aria-label="采集配置分类">
+              <button
+                className={configTab === "keywords" ? "is-active" : ""}
+                role="tab"
+                type="button"
+                aria-selected={configTab === "keywords"}
+                onClick={() => setConfigTab("keywords")}
+              >
+                关键词
+              </button>
+              <button
+                className={configTab === "kol" ? "is-active" : ""}
+                role="tab"
+                type="button"
+                aria-selected={configTab === "kol"}
+                onClick={() => setConfigTab("kol")}
+              >
+                关注账号
+              </button>
+              <button
+                className={configTab === "email" ? "is-active" : ""}
+                role="tab"
+                type="button"
+                aria-selected={configTab === "email"}
+                onClick={() => setConfigTab("email")}
+              >
+                邮件
+              </button>
+            </div>
+
+            <div className="config-drawer__body">
+              {configTab === "keywords" ? (
+                <div role="tabpanel" aria-label="关键词">
+                  <form className="keyword-box" onSubmit={addWatchKeyword}>
+                    <label htmlFor="watch-keyword">关注关键词</label>
+                    <div>
+                      <input
+                        id="watch-keyword"
+                        maxLength={80}
+                        onChange={(event) => setKeywordInput(event.target.value)}
+                        placeholder="Claude Code / MCP"
+                        value={keywordInput}
+                      />
+                      <button type="submit">添加</button>
+                    </div>
+                  </form>
+                  <div className="keyword-list" aria-label="watch keywords">
+                    {!keywordsLoaded ? (
+                      <span className="keyword-empty">正在读取关注词</span>
+                    ) : watchKeywords.length === 0 ? (
+                      <span className="keyword-empty">暂无自定义关注词</span>
+                    ) : (
+                      watchKeywords.map((keyword) => (
+                        <div
+                          className={keyword.enabled ? "keyword-item is-enabled" : "keyword-item"}
+                          key={keyword.id}
+                        >
+                          <button
+                            className="keyword-chip"
+                            aria-pressed={keyword.enabled}
+                            disabled={pendingKeywordIds.includes(keyword.id)}
+                            type="button"
+                            onClick={() => void toggleWatchKeyword(keyword)}
+                          >
+                            <span className="keyword-chip__label">{keyword.keyword}</span>
+                            <span className="keyword-switch" aria-hidden="true">
+                              <span className="keyword-switch__knob">
+                                <Power size={11} />
+                              </span>
+                            </span>
+                            <strong>{keyword.enabled ? "启用" : "停用"}</strong>
+                          </button>
+                          <button
+                            className="keyword-item__delete"
+                            type="button"
+                            aria-label={`删除 ${keyword.keyword}`}
+                            disabled={pendingKeywordIds.includes(keyword.id)}
+                            onClick={() => void deleteWatchKeyword(keyword)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
+              {configTab === "kol" ? (
+                <div className="kol-box" aria-label="kol whitelist" role="tabpanel">
+                  <div className="kol-box__head">
+                    <Users size={16} />
+                    <span>关注账号 · X KOL</span>
+                  </div>
+                  <form className="kol-form" onSubmit={addKolAccount}>
+                    <input
+                      aria-label="KOL handle"
+                      maxLength={40}
+                      onChange={(event) => setKolHandleInput(event.target.value)}
+                      placeholder="@handle 如 sama"
+                      value={kolHandleInput}
+                    />
+                    <select
+                      aria-label="KOL 层级"
+                      value={kolTierInput}
+                      onChange={(event) => setKolTierInput(Number(event.target.value) === 1 ? 1 : 2)}
+                    >
+                      <option value={1}>官方</option>
+                      <option value={2}>大V</option>
+                    </select>
+                    <button type="submit">添加</button>
+                  </form>
+                  <div className="kol-list">
+                    {!kolLoaded ? (
+                      <span className="keyword-empty">正在读取关注账号</span>
+                    ) : kolAccounts.length === 0 ? (
+                      <span className="keyword-empty">暂无关注账号</span>
+                    ) : (
+                      kolAccounts.map((account) => (
+                        <div
+                          className={account.enabled ? "kol-item is-enabled" : "kol-item"}
+                          key={account.id}
+                        >
+                          <button
+                            className="kol-item__main"
+                            type="button"
+                            aria-pressed={account.enabled}
+                            disabled={pendingKolIds.includes(account.id)}
+                            onClick={() => void toggleKolAccount(account)}
+                            title={account.enabled ? "点击停用" : "点击启用"}
+                          >
+                            <span className={account.tier === 1 ? "kol-tier kol-tier--official" : "kol-tier"}>
+                              {account.tier === 1 ? "官方" : "大V"}
+                            </span>
+                            <span className="kol-item__handle">@{account.handle}</span>
+                            <strong>{account.enabled ? "启用" : "停用"}</strong>
+                          </button>
+                          <button
+                            className="kol-item__delete"
+                            type="button"
+                            aria-label={`删除 ${account.handle}`}
+                            disabled={pendingKolIds.includes(account.id)}
+                            onClick={() => void deleteKolAccount(account)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
+              {configTab === "email" ? (
+                <div className="email-box" aria-label="email digest" role="tabpanel">
+                  <div className="email-box__head">
+                    <Mail size={16} />
+                    <span>邮件日报</span>
+                    <em className={emailConfigured ? "email-box__dot is-on" : "email-box__dot"} aria-hidden="true" />
+                  </div>
+                  <p className="email-box__status">{emailStatus}</p>
+                  <p className="email-box__meta">
+                    {emailConfigured
+                      ? `收件人 ${emailRecipient ?? "—"} · 待发送 ${unsentTopicCount} 条`
+                      : "在环境变量填写 SMTP 配置后启用，未发送过的热点不会重复推送。"}
+                  </p>
+                  <button
+                    className="email-box__send"
+                    type="button"
+                    disabled={isSendingEmail || !emailConfigured}
+                    onClick={() => void sendEmailDigest()}
+                  >
+                    <Send size={14} />
+                    {isSendingEmail ? "发送中" : "发送热点日报"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -1456,7 +1699,7 @@ function SourceMeter({ label, value, note }: { label: string; value: number; not
         <strong>{value}%</strong>
       </div>
       <div className="meter__track">
-        <span style={{ width: `${value}%` }} />
+        <span style={{ width: `${value}%` }} aria-hidden="true" />
       </div>
       <small>{note}</small>
     </div>
