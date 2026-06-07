@@ -16,7 +16,7 @@ export default async function Home() {
 async function getInitialHotTopics(): Promise<HotTopicApiItem[]> {
   const topics = await prisma.hotTopic.findMany({
     orderBy: [{ hotScore: "desc" }, { lastSeenAt: "desc" }],
-    take: 12,
+    take: 30,
     include: {
       sources: {
         include: {

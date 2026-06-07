@@ -12,15 +12,71 @@ const analyzeRequestSchema = z.object({
   limit: z.number().int().min(1).max(10).optional()
 });
 
+const statusFilterValues = ["all", "confirmed", "multi-source", "social", "verify"] as const;
+const sourceFilterValues = ["all", "official", "search", "social"] as const;
+const sortValues = ["time", "score", "views", "replies"] as const;
+
+type StatusFilter = (typeof statusFilterValues)[number];
+type SourceFilter = (typeof sourceFilterValues)[number];
+type TopicSort = (typeof sortValues)[number];
+type FilterIssue = {
+  field: string;
+  value: string;
+  reason: string;
+};
+type TopicWithSources = Prisma.HotTopicGetPayload<{
+  include: {
+    sources: {
+      include: {
+        rawItem: {
+          select: {
+            id: true;
+            title: true;
+            url: true;
+            sourceType: true;
+            credibilityLevel: true;
+            author: true;
+            excerpt: true;
+            publishedAt: true;
+            fetchedAt: true;
+            viewCount: true;
+            likeCount: true;
+            retweetCount: true;
+            replyCount: true;
+            source: {
+              select: {
+                name: true;
+              };
+            };
+          };
+        };
+      };
+    };
+  };
+}>;
+
+const DEFAULT_TOPIC_LIMIT = 30;
+const MAX_TOPIC_LIMIT = 100;
+const METRIC_SORT_CANDIDATE_LIMIT = 120;
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
+  const filterIssues: FilterIssue[] = [];
   const searchTerm = (searchParams.get("q") ?? "").trim();
-  const topicWhere = buildTopicWhere(searchParams, searchTerm);
-  const [topics, pendingRawItems, sourceCoverage] = await Promise.all([
+  const statusFilter = parseStatusFilter(searchParams.get("status"), filterIssues);
+  const sourceFilter = parseSourceFilter(searchParams.get("source"), filterIssues);
+  const sortKey = parseSortKey(searchParams.get("sort"), filterIssues);
+  const minScore = parseIntegerFilter(searchParams.get("minScore"), "minScore", 0, 100, filterIssues);
+  const minConfidence = parseIntegerFilter(searchParams.get("minConfidence"), "minConfidence", 0, 100, filterIssues);
+  const topicWhere = buildTopicWhere(searchParams, searchTerm, statusFilter, sourceFilter, minScore, minConfidence);
+  const topicLimit = parseLimit(searchParams.get("limit"), filterIssues);
+  const sortNeedsSourceMetrics = sortKey === "views" || sortKey === "replies";
+  const queryLimit = sortNeedsSourceMetrics ? Math.max(topicLimit, METRIC_SORT_CANDIDATE_LIMIT) : topicLimit;
+  const [topics, totalTopics, pendingRawItems, sourceCoverage] = await Promise.all([
     prisma.hotTopic.findMany({
       where: topicWhere,
-      orderBy: [{ hotScore: "desc" }, { lastSeenAt: "desc" }],
-      take: searchTerm ? 60 : 24,
+      orderBy: buildTopicOrderBy(sortKey),
+      take: queryLimit,
       include: {
         sources: {
           include: {
@@ -50,6 +106,9 @@ export async function GET(request: Request) {
         }
       }
     }),
+    prisma.hotTopic.count({
+      where: topicWhere
+    }),
     prisma.rawItem.count({
       where: {
         status: "NEW"
@@ -58,14 +117,43 @@ export async function GET(request: Request) {
     getSourceCoverage(searchParams)
   ]);
 
-  const dedupedTopics = dedupeTopics(topics).slice(0, searchTerm ? 50 : 12);
+  const limitedTopics = sortNeedsSourceMetrics ? sortTopics(topics, sortKey).slice(0, topicLimit) : topics;
 
   return NextResponse.json({
     analysisConfigured: Boolean(process.env.OPENROUTER_API_KEY),
     model: process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash",
     pendingRawItems,
     sourceCoverage,
-    topics: dedupedTopics.map((topic) => ({
+    totalTopics,
+    filters: {
+      q: searchTerm,
+      status: statusFilter,
+      source: sourceFilter,
+      sort: sortKey,
+      minScore,
+      minConfidence,
+      dateRangeApplied: searchParams.has("startDate") || searchParams.has("endDate"),
+      active: Boolean(
+        searchTerm ||
+          statusFilter !== "all" ||
+          sourceFilter !== "all" ||
+          minScore !== undefined ||
+          minConfidence !== undefined ||
+          searchParams.has("limit") ||
+          searchParams.has("startDate") ||
+          searchParams.has("endDate")
+      ),
+      issues: filterIssues,
+      resultLimit: topicLimit,
+      returnedTopics: limitedTopics.length,
+      optimized: {
+        databaseCount: true,
+        databaseLimit: true,
+        databaseSort: !sortNeedsSourceMetrics,
+        candidateLimit: queryLimit
+      }
+    },
+    topics: limitedTopics.map((topic) => ({
       id: topic.id,
       title: topic.title,
       summary: topic.summary,
@@ -141,16 +229,44 @@ export async function POST(request: Request) {
   }
 }
 
-/** When a keyword is present, search across all topics (ignoring the date window) so
- * older posts and X sources can still be found; otherwise constrain by the date range. */
 function buildTopicWhere(
   searchParams: URLSearchParams,
-  searchTerm: string
+  searchTerm: string,
+  statusFilter: StatusFilter,
+  sourceFilter: SourceFilter,
+  minScore?: number,
+  minConfidence?: number
 ): Prisma.HotTopicWhereInput | undefined {
+  const conditions: Prisma.HotTopicWhereInput[] = [];
+  const dateWhere = buildTopicNewsDateWhere(searchParams);
   if (searchTerm) {
-    return buildTopicSearchWhere(searchTerm);
+    conditions.push(buildTopicSearchWhere(searchTerm));
   }
-  return buildTopicNewsDateWhere(searchParams);
+  if (dateWhere) {
+    conditions.push(dateWhere);
+  }
+  const statusWhere = buildTopicStatusWhere(statusFilter);
+  if (statusWhere) {
+    conditions.push(statusWhere);
+  }
+  const sourceWhere = buildTopicSourceWhere(sourceFilter);
+  if (sourceWhere) {
+    conditions.push(sourceWhere);
+  }
+  if (minScore !== undefined) {
+    conditions.push({ hotScore: { gte: minScore } });
+  }
+  if (minConfidence !== undefined) {
+    conditions.push({ confidence: { gte: minConfidence } });
+  }
+
+  if (conditions.length === 0) {
+    return undefined;
+  }
+  if (conditions.length === 1) {
+    return conditions[0];
+  }
+  return { AND: conditions };
 }
 
 function buildTopicSearchWhere(term: string): Prisma.HotTopicWhereInput {
@@ -177,31 +293,82 @@ function buildTopicSearchWhere(term: string): Prisma.HotTopicWhereInput {
   };
 }
 
-/** Collapse duplicate topics (same title or shared rawItem) — keep first/highest-scored. */
-function dedupeTopics<
-  T extends { title: string; hotScore: number; sources: Array<{ rawItem: { id: string } }> }
->(topics: T[]): T[] {
-  const result: T[] = [];
-  const seenTitles = new Set<string>();
-  const seenRawItemIds = new Set<string>();
-
-  for (const topic of topics) {
-    const titleKey = topic.title.replace(/\s+/g, "").toLowerCase();
-    const rawItemIds = topic.sources.map((source) => source.rawItem.id);
-
-    if (seenTitles.has(titleKey)) {
-      continue;
-    }
-    if (rawItemIds.some((rawItemId) => seenRawItemIds.has(rawItemId))) {
-      continue;
-    }
-
-    seenTitles.add(titleKey);
-    rawItemIds.forEach((rawItemId) => seenRawItemIds.add(rawItemId));
-    result.push(topic);
+function buildTopicStatusWhere(statusFilter: StatusFilter): Prisma.HotTopicWhereInput | undefined {
+  if (statusFilter === "all") {
+    return undefined;
   }
+  if (statusFilter === "confirmed") {
+    return {
+      status: "CONFIRMED",
+      needsVerification: false
+    };
+  }
+  if (statusFilter === "multi-source") {
+    return {
+      status: "MULTI_SOURCE_SIGNAL",
+      needsVerification: false
+    };
+  }
+  if (statusFilter === "social") {
+    return {
+      status: "SOCIAL_BUZZ"
+    };
+  }
+  return {
+    OR: [{ status: "NEEDS_VERIFICATION" }, { needsVerification: true }]
+  };
+}
 
-  return result;
+function buildTopicSourceWhere(sourceFilter: SourceFilter): Prisma.HotTopicWhereInput | undefined {
+  if (sourceFilter === "all") {
+    return undefined;
+  }
+  const sourceType = sourceFilter === "social" ? "TWITTER" : sourceFilter.toUpperCase();
+  return {
+    sources: {
+      some: {
+        rawItem: {
+          sourceType: sourceType as "OFFICIAL" | "SEARCH" | "TWITTER"
+        }
+      }
+    }
+  };
+}
+
+function sortTopics<T extends TopicWithSources>(topics: T[], sortKey: TopicSort): T[] {
+  return [...topics].sort((a, b) => {
+    if (sortKey === "views") {
+      return sumSourceMetric(b, "viewCount") - sumSourceMetric(a, "viewCount") || compareTopicTime(a, b);
+    }
+    if (sortKey === "replies") {
+      return sumSourceMetric(b, "replyCount") - sumSourceMetric(a, "replyCount") || compareTopicTime(a, b);
+    }
+    return compareTopicTime(a, b) || b.hotScore - a.hotScore;
+  });
+}
+
+function buildTopicOrderBy(sortKey: TopicSort): Prisma.HotTopicOrderByWithRelationInput[] {
+  if (sortKey === "score") {
+    return [{ hotScore: "desc" }, { lastSeenAt: "desc" }];
+  }
+  return [{ lastSeenAt: "desc" }, { hotScore: "desc" }];
+}
+
+function sumSourceMetric(topic: TopicWithSources, key: "viewCount" | "replyCount") {
+  return topic.sources.reduce((total, source) => total + (source.rawItem[key] ?? 0), 0);
+}
+
+function compareTopicTime(a: TopicWithSources, b: TopicWithSources) {
+  return getTopicTime(b) - getTopicTime(a);
+}
+
+function getTopicTime(topic: TopicWithSources) {
+  const sourceTime = topic.sources.reduce((latest, source) => {
+    const value = source.rawItem.publishedAt ?? source.rawItem.fetchedAt;
+    const time = value.getTime();
+    return Number.isFinite(time) && time > latest ? time : latest;
+  }, 0);
+  return sourceTime || topic.lastSeenAt.getTime();
 }
 
 function buildTopicNewsDateWhere(searchParams: URLSearchParams): Prisma.HotTopicWhereInput | undefined {
@@ -220,3 +387,85 @@ function buildTopicNewsDateWhere(searchParams: URLSearchParams): Prisma.HotTopic
   };
 }
 
+function parseStatusFilter(value: string | null, issues: FilterIssue[]): StatusFilter {
+  if (!value) {
+    return "all";
+  }
+  if (statusFilterValues.includes(value as StatusFilter)) {
+    return value as StatusFilter;
+  }
+  issues.push({
+    field: "status",
+    value,
+    reason: "Unsupported status filter; fell back to all."
+  });
+  return "all";
+}
+
+function parseSourceFilter(value: string | null, issues: FilterIssue[]): SourceFilter {
+  if (!value) {
+    return "all";
+  }
+  if (sourceFilterValues.includes(value as SourceFilter)) {
+    return value as SourceFilter;
+  }
+  issues.push({
+    field: "source",
+    value,
+    reason: "Unsupported source filter; fell back to all."
+  });
+  return "all";
+}
+
+function parseSortKey(value: string | null, issues: FilterIssue[]): TopicSort {
+  if (!value) {
+    return "time";
+  }
+  if (sortValues.includes(value as TopicSort)) {
+    return value as TopicSort;
+  }
+  issues.push({
+    field: "sort",
+    value,
+    reason: "Unsupported sort key; fell back to time."
+  });
+  return "time";
+}
+
+function parseLimit(value: string | null, issues: FilterIssue[]) {
+  if (!value) {
+    return DEFAULT_TOPIC_LIMIT;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_TOPIC_LIMIT) {
+    return parsed;
+  }
+  issues.push({
+    field: "limit",
+    value,
+    reason: `Limit must be between 1 and ${MAX_TOPIC_LIMIT}; fell back to ${DEFAULT_TOPIC_LIMIT}.`
+  });
+  return DEFAULT_TOPIC_LIMIT;
+}
+
+function parseIntegerFilter(
+  value: string | null,
+  field: string,
+  min: number,
+  max: number,
+  issues: FilterIssue[]
+) {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isInteger(parsed) && parsed >= min && parsed <= max) {
+    return parsed;
+  }
+  issues.push({
+    field,
+    value,
+    reason: `${field} must be between ${min} and ${max}; ignored.`
+  });
+  return undefined;
+}

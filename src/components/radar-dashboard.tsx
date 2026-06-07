@@ -29,8 +29,11 @@ import type { ReactNode } from "react";
 
 type TopicStatus = "confirmed" | "multi-source" | "social" | "verify";
 type FilterKey = "all" | TopicStatus;
-type DatePreset = "1d" | "7d";
-type SortKey = "time" | "views" | "replies";
+type DatePreset = "1d" | "7d" | "30d" | "all";
+type SourceFilterKey = "all" | "official" | "search" | "social";
+type SortKey = "time" | "score" | "views" | "replies";
+type ThresholdKey = "all" | "70" | "85";
+type TopicLimit = 12 | 30 | 60 | 100;
 type ConfigTab = "keywords" | "kol" | "email";
 
 type Topic = {
@@ -169,6 +172,30 @@ type AnalyzeApiResponse = {
   model: string;
   pendingRawItems: number;
   sourceCoverage: SourceCoverage;
+  totalTopics?: number;
+  filters?: {
+    q: string;
+    status: FilterKey;
+    source?: SourceFilterKey;
+    sort: SortKey;
+    minScore?: number;
+    minConfidence?: number;
+    dateRangeApplied?: boolean;
+    active?: boolean;
+    issues?: Array<{
+      field: string;
+      value: string;
+      reason: string;
+    }>;
+    resultLimit?: number;
+    returnedTopics?: number;
+    optimized?: {
+      databaseCount: boolean;
+      databaseLimit: boolean;
+      databaseSort: boolean;
+      candidateLimit: number;
+    };
+  };
   topics: HotTopicApiItem[];
 };
 
@@ -230,6 +257,45 @@ const sortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "replies", label: "评论数" }
 ];
 
+const expandedDatePresets: Array<{ key: DatePreset; label: string }> = [
+  { key: "1d", label: "1天" },
+  { key: "7d", label: "7天" },
+  { key: "30d", label: "30天" },
+  { key: "all", label: "全部时间" }
+];
+
+const expandedSortOptions: Array<{ key: SortKey; label: string }> = [
+  { key: "time", label: "新闻时间" },
+  { key: "score", label: "热度" },
+  { key: "views", label: "观看量" },
+  { key: "replies", label: "评论数" }
+];
+
+const sourceOptions: Array<{ key: SourceFilterKey; label: string }> = [
+  { key: "all", label: "全部来源" },
+  { key: "official", label: "官方" },
+  { key: "search", label: "搜索" },
+  { key: "social", label: "社交" }
+];
+
+const scoreOptions: Array<{ key: ThresholdKey; label: string }> = [
+  { key: "all", label: "全部热度" },
+  { key: "70", label: "70+" },
+  { key: "85", label: "85+" }
+];
+
+const confidenceOptions: Array<{ key: ThresholdKey; label: string }> = [
+  { key: "all", label: "全部置信" },
+  { key: "70", label: "70+" },
+  { key: "85", label: "85+" }
+];
+
+const topicLimitOptions: Array<{ key: TopicLimit; label: string }> = [
+  { key: 12, label: "12条" },
+  { key: 30, label: "30条" },
+  { key: 60, label: "60条" },
+  { key: 100, label: "100条" }
+];
 const statusCopy: Record<TopicStatus, string> = {
   confirmed: "已确认",
   "multi-source": "多源线索",
@@ -284,6 +350,10 @@ export function RadarDashboard({
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
   const [datePreset, setDatePreset] = useState<DatePreset>("7d");
   const [sortKey, setSortKey] = useState<SortKey>("time");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilterKey>("all");
+  const [scoreFilter, setScoreFilter] = useState<ThresholdKey>("all");
+  const [confidenceFilter, setConfidenceFilter] = useState<ThresholdKey>("all");
+  const [topicLimit, setTopicLimit] = useState<TopicLimit>(30);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTopicId, setActiveTopicId] = useState(() => initialHotTopics[0]?.id ?? "");
   const [scanPulse, setScanPulse] = useState(0);
@@ -301,6 +371,8 @@ export function RadarDashboard({
     social: 0,
     total: 0
   });
+  const [filterSummary, setFilterSummary] = useState("筛选结果加载中");
+  const [filterError, setFilterError] = useState("");
   const [analysisConfigured, setAnalysisConfigured] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -322,14 +394,25 @@ export function RadarDashboard({
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [configTab, setConfigTab] = useState<ConfigTab>("keywords");
   const [pipelineExpanded, setPipelineExpanded] = useState(false);
+  const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
   const lastAutoAnalyzeAt = useRef(0);
   const isScanningRef = useRef(isScanning);
   const watchKeywordsRef = useRef(watchKeywords);
 
   const trimmedSearch = searchQuery.trim();
   const topicsQuery = useMemo(
-    () => buildTopicsQuery(datePreset, trimmedSearch),
-    [datePreset, trimmedSearch]
+    () =>
+      buildTopicsQuery(
+        datePreset,
+        trimmedSearch,
+        activeFilter,
+        sortKey,
+        sourceFilter,
+        scoreFilter,
+        confidenceFilter,
+        topicLimit
+      ),
+    [activeFilter, confidenceFilter, datePreset, scoreFilter, sortKey, sourceFilter, topicLimit, trimmedSearch]
   );
   const refreshSummary = useMemo(
     () => formatRefreshSummary(lastUpdatedAt, nextRefreshAt, clockNow),
@@ -345,23 +428,21 @@ export function RadarDashboard({
     () => formatPipelineSummary(runDetails, pendingRawItems, isScanning),
     [isScanning, pendingRawItems, runDetails]
   );
+  const advancedFilterCount = useMemo(() => {
+    return [sourceFilter !== "all", scoreFilter !== "all", confidenceFilter !== "all", topicLimit !== 30].filter(Boolean)
+      .length;
+  }, [confidenceFilter, scoreFilter, sourceFilter, topicLimit]);
 
   // Only AI-analyzed (Chinese, scored) topics become cards. Raw collected items
   // stay as a "分析中" count until the pipeline summarizes + translates them.
-  const dashboardTopics = useMemo(() => [...liveTopics].sort(compareTopicDate), [liveTopics]);
+  const dashboardTopics = useMemo(() => liveTopics, [liveTopics]);
   const visibleTopics = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const filtered = dashboardTopics.filter((topic) => {
-      if (activeFilter !== "all" && topic.status !== activeFilter) {
-        return false;
-      }
-      if (query && !matchesSearch(topic, query)) {
-        return false;
-      }
-      return true;
-    });
-    return filtered.sort(getTopicComparator(sortKey));
-  }, [activeFilter, dashboardTopics, searchQuery, sortKey]);
+    if (!query) {
+      return dashboardTopics;
+    }
+    return dashboardTopics.filter((topic) => matchesSearch(topic, query));
+  }, [dashboardTopics, searchQuery]);
 
   const activeTopic =
     dashboardTopics.find((topic) => topic.id === activeTopicId) ?? visibleTopics[0] ?? dashboardTopics[0];
@@ -474,18 +555,25 @@ export function RadarDashboard({
   }
 
   async function loadHotTopics() {
-    const response = await fetch(`/api/analyze${topicsQuery}`, { cache: "no-store" });
-    if (!response.ok) {
-      return;
-    }
+    try {
+      const response = await fetch(`/api/analyze${topicsQuery}`, { cache: "no-store" });
+      if (!response.ok) {
+        setFilterError(`Filter request failed: HTTP ${response.status}`);
+        return;
+      }
 
-    const data = (await response.json()) as AnalyzeApiResponse;
-    setAnalysisConfigured(data.analysisConfigured);
-    setAnalysisModel(data.model);
-    setPendingRawItems(data.pendingRawItems);
-    setSourceCoverage(data.sourceCoverage ?? { official: 0, search: 0, social: 0, total: 0 });
-    setAnalysisStatus(formatAnalysisStatus(data));
-    setLiveTopics(data.topics.map(mapHotTopic));
+      const data = (await response.json()) as AnalyzeApiResponse;
+      setAnalysisConfigured(data.analysisConfigured);
+      setAnalysisModel(data.model);
+      setPendingRawItems(data.pendingRawItems);
+      setSourceCoverage(data.sourceCoverage ?? { official: 0, search: 0, social: 0, total: 0 });
+      setAnalysisStatus(formatAnalysisStatus(data));
+      setLiveTopics(data.topics.map(mapHotTopic));
+      setFilterSummary(formatFilterSummary(data));
+      setFilterError(formatFilterIssues(data));
+    } catch (error) {
+      setFilterError(`Filter request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async function loadWatchKeywords() {
@@ -934,23 +1022,100 @@ export function RadarDashboard({
               </button>
             ) : null}
           </div>
-          <div className="sort-filter" role="group" aria-label="sort topics">
-            {sortOptions.map((option) => (
-              <button
-                className={sortKey === option.key ? "is-active" : ""}
-                key={option.key}
-                type="button"
-                onClick={() => setSortKey(option.key)}
+          <label className="filter-select" aria-label="sort topics">
+            <span>{"\u6392\u5e8f"}</span>
+            <select value={sortKey} onChange={(event) => setSortKey(event.target.value as SortKey)}>
+              {expandedSortOptions.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className={advancedFiltersOpen ? "filter-dock__advanced-toggle is-active" : "filter-dock__advanced-toggle"}
+            type="button"
+            aria-expanded={advancedFiltersOpen}
+            onClick={() => setAdvancedFiltersOpen((value) => !value)}
+          >
+            <SlidersHorizontal size={15} />
+            <span className="filter-dock__advanced-label">
+              {"\u7b5b\u9009"}{advancedFilterCount > 0 ? ` ${advancedFilterCount}` : ""}
+            </span>
+            <ChevronDown size={15} aria-hidden="true" />
+          </button>
+          <div className={advancedFiltersOpen ? "filter-dropdown-panel" : "filter-dropdown-panel is-collapsed"}>
+            <label
+              className="compact-filter-select"
+              aria-label="source filters"
+              title={`来源：${sourceOptions.find((option) => option.key === sourceFilter)?.label ?? "全部来源"}`}
+            >
+              <Globe2 size={16} aria-hidden="true" />
+              {sourceFilter !== "all" ? <span>{sourceOptions.find((option) => option.key === sourceFilter)?.label}</span> : null}
+              <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as SourceFilterKey)}>
+                {sourceOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label
+              className="compact-filter-select"
+              aria-label="score filters"
+              title={`热度：${scoreOptions.find((option) => option.key === scoreFilter)?.label ?? "全部热度"}`}
+            >
+              <Zap size={16} aria-hidden="true" />
+              {scoreFilter !== "all" ? <span>{scoreOptions.find((option) => option.key === scoreFilter)?.label}</span> : null}
+              <select value={scoreFilter} onChange={(event) => setScoreFilter(event.target.value as ThresholdKey)}>
+                {scoreOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label
+              className="compact-filter-select"
+              aria-label="confidence filters"
+              title={`置信：${confidenceOptions.find((option) => option.key === confidenceFilter)?.label ?? "全部置信"}`}
+            >
+              <BadgeCheck size={16} aria-hidden="true" />
+              {confidenceFilter !== "all" ? (
+                <span>{confidenceOptions.find((option) => option.key === confidenceFilter)?.label}</span>
+              ) : null}
+              <select
+                value={confidenceFilter}
+                onChange={(event) => setConfidenceFilter(event.target.value as ThresholdKey)}
               >
-                {option.label}
-              </button>
-            ))}
+                {confidenceOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label
+              className="compact-filter-select"
+              aria-label="topic limit"
+              title={`展示：${topicLimitOptions.find((option) => option.key === topicLimit)?.label ?? "30条"}`}
+            >
+              <Eye size={16} aria-hidden="true" />
+              <span>{topicLimitOptions.find((option) => option.key === topicLimit)?.label}</span>
+              <select value={topicLimit} onChange={(event) => setTopicLimit(Number(event.target.value) as TopicLimit)}>
+                {topicLimitOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         </div>
 
         <div className="date-filter" aria-label="news date filters">
           <div className="date-filter__range" role="group" aria-label="news date range">
-          {datePresets.map((preset) => (
+          {expandedDatePresets.map((preset) => (
             <button
               className={datePreset === preset.key ? "is-active" : ""}
               key={preset.key}
@@ -972,6 +1137,10 @@ export function RadarDashboard({
               <span>同步中…</span>
             )}
           </p>
+        </div>
+        <div className="filter-dock__meta" aria-live="polite">
+          <span>{filterSummary}</span>
+          {filterError ? <strong>{filterError}</strong> : null}
         </div>
       </section>
 
@@ -1470,19 +1639,51 @@ function mapTopicStatus(status: HotTopicApiItem["status"], needsVerification: bo
   return "confirmed";
 }
 
-function buildTopicsQuery(preset: DatePreset, search: string) {
+function buildTopicsQuery(
+  preset: DatePreset,
+  search: string,
+  status: FilterKey,
+  sort: SortKey,
+  source: SourceFilterKey,
+  score: ThresholdKey,
+  confidence: ThresholdKey,
+  limit: TopicLimit
+) {
   const params = new URLSearchParams();
 
-  if (search) {
-    // Searching looks across all topics regardless of the date window.
-    params.set("q", search);
-  } else {
+  if (preset !== "all") {
     const now = new Date();
     const start = new Date(now);
-    const days = preset === "1d" ? 0 : 6;
-    start.setDate(now.getDate() - days);
+    const daysByPreset: Record<Exclude<DatePreset, "all">, number> = {
+      "1d": 0,
+      "7d": 6,
+      "30d": 29
+    };
+    start.setDate(now.getDate() - daysByPreset[preset]);
     params.set("startDate", toDateInputValue(start));
     params.set("endDate", toDateInputValue(now));
+  }
+
+  if (search) {
+    params.set("q", search);
+  }
+  if (status !== "all") {
+    params.set("status", status);
+  }
+  if (source !== "all") {
+    params.set("source", source);
+  }
+  if (sort !== "time") {
+    params.set("sort", sort);
+  }
+  if (score !== "all") {
+    params.set("minScore", score);
+  }
+  if (confidence !== "all") {
+    params.set("minConfidence", confidence);
+  }
+  if (limit !== 30) {
+    params.set("limit", String(limit));
   }
 
   const query = params.toString();
@@ -1549,6 +1750,30 @@ function formatAnalysisStatus(data: AnalyzeApiResponse) {
   return "等待自动分析";
 }
 
+function formatFilterSummary(data: AnalyzeApiResponse) {
+  const filters = data.filters;
+  const total = data.totalTopics ?? data.topics.length;
+  const returned = filters?.returnedTopics ?? data.topics.length;
+  const sourceText = getOptionLabel(sourceOptions, filters?.source ?? "all");
+  const sortText = getOptionLabel(expandedSortOptions, filters?.sort ?? "time");
+  const scoreText = filters?.minScore ? `热度 ${filters.minScore}+` : "全部热度";
+  const confidenceText = filters?.minConfidence ? `置信 ${filters.minConfidence}+` : "全部置信";
+  const dateText = filters?.dateRangeApplied ? "当前时间范围" : "全部时间";
+  return `命中 ${total} 条，展示 ${returned} 条 · ${dateText} · ${sourceText} · ${scoreText} · ${confidenceText} · 按${sortText}排序`;
+}
+
+function getOptionLabel<T extends string | number>(options: Array<{ key: T; label: string }>, key: T) {
+  return options.find((option) => option.key === key)?.label ?? String(key);
+}
+
+function formatFilterIssues(data: AnalyzeApiResponse) {
+  const issues = data.filters?.issues ?? [];
+  if (issues.length === 0) {
+    return "";
+  }
+  return issues.map((issue) => `${issue.field}=${issue.value}: ${issue.reason}`).join(" | ");
+}
+
 function formatCollectRunStatus(run: CollectRunApiItem) {
   const startedAt = formatClock(run.startedAt);
   const finishedAt = run.finishedAt ? formatClock(run.finishedAt) : "";
@@ -1601,21 +1826,6 @@ function formatDateLabel(value?: string | null) {
     month: "2-digit",
     day: "2-digit"
   });
-}
-
-function compareTopicDate(a: Topic, b: Topic) {
-  return new Date(b.dateValue).getTime() - new Date(a.dateValue).getTime();
-}
-
-/** Sort by the selected dimension (descending), falling back to recency on ties. */
-function getTopicComparator(sortKey: SortKey): (a: Topic, b: Topic) => number {
-  if (sortKey === "views") {
-    return (a, b) => b.totalViews - a.totalViews || compareTopicDate(a, b);
-  }
-  if (sortKey === "replies") {
-    return (a, b) => b.totalReplies - a.totalReplies || compareTopicDate(a, b);
-  }
-  return compareTopicDate;
 }
 
 /** Case-insensitive keyword match across a topic's text and source metadata. */
@@ -1813,3 +2023,4 @@ function formatCredibilityLevel(value: string) {
   };
   return map[value] ?? value;
 }
+
