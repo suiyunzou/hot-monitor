@@ -28,10 +28,10 @@ npm run db:apply
 echo "=> 5/6 构建项目 (npm run build)..."
 npm run build
 
-# 6. 重启 PM2 进程
+# 6. 重启 PM2 进程，并指定运行在 3000 端口
 echo "=> 6/6 重启应用服务 (pm2)..."
-# 如果使用了 PM2 来守护进程，这里会自动重载；如果应用尚未启动，则会使用 npm start 启动
-pm2 reload suiyunzou-hot-monitor 2>/dev/null || pm2 start npm --name "suiyunzou-hot-monitor" -- start
+# 如果使用了 PM2 来守护进程，这里会自动重载；如果应用尚未启动，则会使用 npm start 启动，并强制指定端口为 3000
+pm2 reload suiyunzou-hot-monitor 2>/dev/null || PORT=3000 pm2 start npm --name "suiyunzou-hot-monitor" -- start
 
 echo "======================================"
 echo "部署完成！🎉"
